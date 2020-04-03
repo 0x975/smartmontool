@@ -6,14 +6,7 @@
  * Copyright (C) 2003-11 Philip Williams, Bruce Allen
  * Copyright (C) 2008-15 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef KNOWNDRIVES_H_
@@ -60,6 +53,8 @@ int showmatchingpresets(const char *model, const char *firmware);
 const drive_settings * lookup_drive_apply_presets(
   const ata_identify_device * drive, ata_vendor_attr_defs & defs,
   firmwarebug_defs & firmwarebugs);
+
+const drive_settings * lookup_drive(const char * model, const char * firmware);
 
 // Get path for additional database file
 const char * get_drivedb_path_add();

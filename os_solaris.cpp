@@ -6,15 +6,7 @@
  * Copyright (C) 2003-08 SAWADA Keiji
  * Copyright (C) 2003-15 Casper Dik
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <stdlib.h>
@@ -27,7 +19,7 @@
 
 // These are needed to define prototypes for the functions defined below
 #include "config.h"
-#include "int64.h"
+
 #include "atacmds.h"
 #include "scsicmds.h"
 #include "utility.h"
@@ -38,7 +30,7 @@
 #define ARGUSED(x) ((void)(x))
 
 const char *os_XXXX_c_cvsid="$Id$" \
-ATACMDS_H_CVSID CONFIG_H_CVSID INT64_H_CVSID OS_SOLARIS_H_CVSID SCSICMDS_H_CVSID UTILITY_H_CVSID;
+ATACMDS_H_CVSID CONFIG_H_CVSID OS_SOLARIS_H_CVSID SCSICMDS_H_CVSID UTILITY_H_CVSID;
 
 // The printwarning() function warns about unimplemented functions
 int printedout[2];
@@ -70,9 +62,7 @@ int printwarning(int which){
 
 // print examples for smartctl
 void print_smartctl_examples(){
-  printf("=================================================== SMARTCTL EXAMPLES =====\n\n");
-#ifdef HAVE_GETOPT_LONG
-  printf(
+  printf("=================================================== SMARTCTL EXAMPLES =====\n\n"
          "  smartctl -a /dev/rdsk/c0t0d0s0             (Prints all SMART information)\n\n"
          "  smartctl --smart=on --offlineauto=on --saveauto=on /dev/rdsk/c0t0d0s0\n"
          "                                              (Enables SMART on first disk)\n\n"
@@ -80,15 +70,6 @@ void print_smartctl_examples(){
          "  smartctl --attributes --log=selftest --quietmode=errorsonly /dev/rdsk/c0t0d0s0\n"
          "                                      (Prints Self-Test & Attribute errors)\n"
          );
-#else
-  printf(
-         "  smartctl -a /dev/rdsk/c0t0d0s0               (Prints all SMART information)\n"
-         "  smartctl -s on -o on -S on /dev/rdsk/c0t0d0s0 (Enables SMART on first disk)\n"
-         "  smartctl -t long /dev/rdsk/c0t0d0s0      (Executes extended disk self-test)\n"
-         "  smartctl -A -l selftest -q errorsonly /dev/rdsk/c0t0d0s0\n"
-         "                                        (Prints Self-Test & Attribute errors)\n"
-         );
-#endif
   return;
 }
 
@@ -320,8 +301,8 @@ int ata_command_interface(int fd, smart_command_set command, int select, char *d
 	return smart_status_check(fd);
     default:
 	pout("Unrecognized command %d in ata_command_interface() of os_solaris.c\n", command);
-	EXIT(1);
-	break;
+        errno = EINVAL;
+        return -1;
     }
 #else /* WITH_SOLARIS_SPARC_ATA */
     ARGUSED(fd); ARGUSED(command); ARGUSED(select); ARGUSED(data);
@@ -363,7 +344,7 @@ int do_scsi_cmnd_io(int fd, struct scsi_cmnd_io * iop, int report)
 
       pout("  Outgoing data, len=%d%s:\n", (int)iop->dxfer_len,
            (trunc ? " [only first 256 bytes shown]" : ""));
-      dStrHex((char *)iop->dxferp, (trunc ? 256 : iop->dxfer_len) , 1);
+      dStrHex(iop->dxferp, (trunc ? 256 : iop->dxfer_len) , 1);
     }
   }
   memset(&uscsi, 0, sizeof (uscsi));
@@ -420,7 +401,7 @@ int do_scsi_cmnd_io(int fd, struct scsi_cmnd_io * iop, int report)
              iop->sensep[12], iop->sensep[13]);
       if (report > 1) {
           pout("  >>> Sense buffer, len=%d:\n", len);
-          dStrHex((const char *)iop->sensep, ((len > 252) ? 252 : len) , 1);
+          dStrHex(iop->sensep, ((len > 252) ? 252 : len) , 1);
       }
     } else if (iop->scsi_status)
       pout("  status=%x\n", iop->scsi_status);
@@ -432,7 +413,7 @@ int do_scsi_cmnd_io(int fd, struct scsi_cmnd_io * iop, int report)
         trunc = (len > 256) ? 1 : 0;
         pout("  Incoming data, len=%d%s:\n", len,
              (trunc ? " [only first 256 bytes shown]" : ""));
-        dStrHex((char *)iop->dxferp, (trunc ? 256 : len) , 1);
+        dStrHex(iop->dxferp, (trunc ? 256 : len) , 1);
       }
     }
   }

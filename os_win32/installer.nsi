@@ -1,17 +1,11 @@
 ;
 ; os_win32/installer.nsi - smartmontools install NSIS script
 ;
-; Home page of code is: http://www.smartmontools.org
+; Home page of code is: https://www.smartmontools.org
 ;
-; Copyright (C) 2006-16 Christian Franke
+; Copyright (C) 2006-19 Christian Franke
 ;
-; This program is free software; you can redistribute it and/or modify
-; it under the terms of the GNU General Public License as published by
-; the Free Software Foundation; either version 2, or (at your option)
-; any later version.
-;
-; You should have received a copy of the GNU General Public License
-; (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
+; SPDX-License-Identifier: GPL-2.0-or-later
 ;
 ; $Id$
 ;
@@ -46,6 +40,19 @@ InstallColors /windows
 ; Set in .onInit
 ;InstallDir "$PROGRAMFILES\smartmontools"
 ;InstallDirRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "InstallLocation"
+
+!ifdef VERSION
+  VIProductVersion "${VERSION}"
+  VIAddVersionKey /LANG=1033-English "CompanyName" "www.smartmontools.org"
+  VIAddVersionKey /LANG=1033-English "FileDescription" "SMART Monitoring Tools"
+  VIAddVersionKey /LANG=1033-English "FileVersion" "${VERSION}"
+ !ifdef YY
+  VIAddVersionKey /LANG=1033-English "LegalCopyright" "(C) 2002-20${YY}, Bruce Allen, Christian Franke, www.smartmontools.org"
+ !endif
+  VIAddVersionKey /LANG=1033-English "OriginalFilename" "${OUTFILE}"
+  VIAddVersionKey /LANG=1033-English "ProductName" "smartmontools"
+  VIAddVersionKey /LANG=1033-English "ProductVersion" "${VERSION}"
+!endif
 
 Var EDITOR
 
@@ -194,7 +201,8 @@ Section "!Documentation" DOC_SECTION
   SetOutPath "$INSTDIR\doc"
   File "${INPDIR}\doc\AUTHORS.txt"
   File "${INPDIR}\doc\ChangeLog.txt"
-  File "${INPDIR}\doc\ChangeLog-5.0-6.0.txt"
+  Delete "$INSTDIR\doc\ChangeLog-5.0-6.0.txt" ; TODO: Remove after smartmontools 7.1
+  File "${INPDIR}\doc\ChangeLog-6.0-7.0.txt"
   File "${INPDIR}\doc\COPYING.txt"
   File "${INPDIR}\doc\INSTALL.txt"
   File "${INPDIR}\doc\NEWS.txt"
@@ -210,12 +218,12 @@ Section "!Documentation" DOC_SECTION
   File "${INPDIR}\doc\checksums??.txt"
 !endif
   File "${INPDIR}\doc\smartctl.8.html"
-  File "${INPDIR}\doc\smartctl.8.txt"
+  File "${INPDIR}\doc\smartctl.8.pdf"
   File "${INPDIR}\doc\smartd.8.html"
-  File "${INPDIR}\doc\smartd.8.txt"
+  File "${INPDIR}\doc\smartd.8.pdf"
   File "${INPDIR}\doc\smartd.conf"
   File "${INPDIR}\doc\smartd.conf.5.html"
-  File "${INPDIR}\doc\smartd.conf.5.txt"
+  File "${INPDIR}\doc\smartd.conf.5.pdf"
 
 SectionEnd
 
@@ -226,24 +234,22 @@ Section "Uninstaller" UNINST_SECTION
 
   CreateDirectory "$INSTDIR"
 
-  ; Keep old Install_Dir registry entry for GSmartControl
-  ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\GSmartControl" "InstallLocation"
-  ReadRegStr $1 HKLM "Software\smartmontools" "Install_Dir"
-  ${If} "$0$1" != ""
-    WriteRegStr HKLM "Software\smartmontools" "Install_Dir" "$INSTDIR"
-  ${EndIf}
+  ; Remove old "Install_Dir" registry entry (smartmontools < r3911/6.3)
+  ; No longer needed for GSmartControl
+  DeleteRegKey HKLM "Software\smartmontools" ; TODO: Remove after smartmontools 7.0
 
   ; Write uninstall keys and program
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "DisplayName" "smartmontools"
 !ifdef VERSTR
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "DisplayVersion" "${VERSTR}"
 !endif
+  ; Important: GSmartControl (>= 1.0.0) reads "InstallLocation" to detect location of bin\smartctl-nc.exe
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "UninstallString" '"$INSTDIR\uninst-smartmontools.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "Publisher"     "smartmontools.org"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "URLInfoAbout"  "https://www.smartmontools.org/"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "HelpLink"      "http://sourceforge.net/projects/smartmontools/support"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "URLUpdateInfo" "http://builds.smartmontools.org/"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "HelpLink"      "https://www.smartmontools.org/wiki/Help"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "URLUpdateInfo" "https://builds.smartmontools.org/"
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "NoModify" 1
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "NoRepair" 1
   WriteUninstaller "uninst-smartmontools.exe"
@@ -269,7 +275,6 @@ Section "Start Menu Shortcuts" MENU_SECTION
   ${OrIf} ${FileExists} "$INSTDIR\bin\smartd.exe"
     SetOutPath "$INSTDIR\bin"
     !insertmacro FileExe "bin\runcmdu.exe" ""
-    Delete "$INSTDIR\bin\runcmdu.exe.manifest" ; TODO: Remove after smartmontools 6.5
   ${EndIf}
 
   ; smartctl
@@ -326,9 +331,9 @@ Section "Start Menu Shortcuts" MENU_SECTION
     CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartctl manual page (html).lnk"    "$INSTDIR\doc\smartctl.8.html"
     CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd manual page (html).lnk"      "$INSTDIR\doc\smartd.8.html"
     CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd.conf manual page (html).lnk" "$INSTDIR\doc\smartd.conf.5.html"
-    CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartctl manual page (txt).lnk"     "$INSTDIR\doc\smartctl.8.txt"
-    CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd manual page (txt).lnk"       "$INSTDIR\doc\smartd.8.txt"
-    CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd.conf manual page (txt).lnk"  "$INSTDIR\doc\smartd.conf.5.txt"
+    CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartctl manual page (pdf).lnk"     "$INSTDIR\doc\smartctl.8.pdf"
+    CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd manual page (pdf).lnk"       "$INSTDIR\doc\smartd.8.pdf"
+    CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd.conf manual page (pdf).lnk"  "$INSTDIR\doc\smartd.conf.5.pdf"
     CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\smartd.conf sample.lnk" "$EDITOR" '"$INSTDIR\doc\smartd.conf"'
     ${If} ${FileExists} "$INSTDIR\bin\drivedb.h"
       CreateShortCut "$SMPROGRAMS\smartmontools\Documentation\drivedb.h (view).lnk" "$EDITOR" '"$INSTDIR\bin\drivedb.h"'
@@ -341,7 +346,7 @@ Section "Start Menu Shortcuts" MENU_SECTION
 
   ; Homepage
   CreateShortCut "$SMPROGRAMS\smartmontools\smartmontools Home Page.lnk" "https://www.smartmontools.org/"
-  CreateShortCut "$SMPROGRAMS\smartmontools\smartmontools Daily Builds.lnk" "http://builds.smartmontools.org/"
+  CreateShortCut "$SMPROGRAMS\smartmontools\smartmontools Daily Builds.lnk" "https://builds.smartmontools.org/"
 
   ; drivedb.h update
   ${If} ${FileExists} "$INSTDIR\bin\update-smart-drivedb.exe"
@@ -416,9 +421,8 @@ Section "Uninstall"
     ${EndIf}
   ${EndIf}
 
-  ; Remove installer registry keys
+  ; Remove installer registry key
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools"
-  DeleteRegKey HKLM "Software\smartmontools"
 
   ; Remove conf file ?
   ${If} ${FileExists} "$INSTDIR\bin\smartd.conf"
@@ -460,17 +464,13 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\drivedb.h.lastcheck"
   Delete "$INSTDIR\bin\drivedb.h.old"
   Delete "$INSTDIR\bin\update-smart-drivedb.exe"
-  Delete "$INSTDIR\bin\smartctl-run.bat"
-  Delete "$INSTDIR\bin\smartd-run.bat"
-  Delete "$INSTDIR\bin\net-run.bat"
   Delete "$INSTDIR\bin\runcmda.exe"
-  Delete "$INSTDIR\bin\runcmda.exe.manifest" ; TODO: Remove after smartmontools 6.5
   Delete "$INSTDIR\bin\runcmdu.exe"
-  Delete "$INSTDIR\bin\runcmdu.exe.manifest" ; TODO: Remove after smartmontools 6.5
   Delete "$INSTDIR\bin\wtssendmsg.exe"
   Delete "$INSTDIR\doc\AUTHORS.txt"
   Delete "$INSTDIR\doc\ChangeLog.txt"
-  Delete "$INSTDIR\doc\ChangeLog-5.0-6.0.txt"
+  Delete "$INSTDIR\doc\ChangeLog-5.0-6.0.txt" ; TODO: Remove after smartmontools 7.1
+  Delete "$INSTDIR\doc\ChangeLog-6.0-7.0.txt"
   Delete "$INSTDIR\doc\COPYING.txt"
   Delete "$INSTDIR\doc\INSTALL.txt"
   Delete "$INSTDIR\doc\NEWS.txt"
@@ -478,12 +478,12 @@ Section "Uninstall"
   Delete "$INSTDIR\doc\TODO.txt"
   Delete "$INSTDIR\doc\checksums*.txt"
   Delete "$INSTDIR\doc\smartctl.8.html"
-  Delete "$INSTDIR\doc\smartctl.8.txt"
+  Delete "$INSTDIR\doc\smartctl.8.pdf"
   Delete "$INSTDIR\doc\smartd.8.html"
-  Delete "$INSTDIR\doc\smartd.8.txt"
+  Delete "$INSTDIR\doc\smartd.8.pdf"
   Delete "$INSTDIR\doc\smartd.conf"
   Delete "$INSTDIR\doc\smartd.conf.5.html"
-  Delete "$INSTDIR\doc\smartd.conf.5.txt"
+  Delete "$INSTDIR\doc\smartd.conf.5.pdf"
   Delete "$INSTDIR\uninst-smartmontools.exe"
 
   ; Remove shortcuts
@@ -537,14 +537,11 @@ Function .onInit
   ${If} $INSTDIR == "" ; /D=PATH option not specified ?
     ReadRegStr $INSTDIR HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\smartmontools" "InstallLocation"
     ${If} $INSTDIR == "" ; Not already installed ?
-      ReadRegStr $INSTDIR HKLM "Software\smartmontools" "Install_Dir"
-      ${If} $INSTDIR == "" ; Not already installed (smartmontools < r3911/6.3) ?
-        StrCpy $INSTDIR "$PROGRAMFILES\smartmontools"
+      StrCpy $INSTDIR "$PROGRAMFILES\smartmontools"
 !ifdef INPDIR64
-        StrCpy $INSTDIR32 $INSTDIR
-        StrCpy $INSTDIR64 "$PROGRAMFILES64\smartmontools"
+      StrCpy $INSTDIR32 $INSTDIR
+      StrCpy $INSTDIR64 "$PROGRAMFILES64\smartmontools"
 !endif
-      ${EndIf}
     ${EndIf}
   ${EndIf}
 
@@ -566,10 +563,13 @@ Function .onInit
   !insertmacro AdjustSectionSize ${SMARTCTL_NC_SECTION}
 !endif
 
-  ; Use Notepad++ if installed
+  ; Use 32-bit or 64-bit Notepad++ if installed
   StrCpy $EDITOR "$PROGRAMFILES\Notepad++\notepad++.exe"
   ${IfNot} ${FileExists} "$EDITOR"
-    StrCpy $EDITOR "notepad.exe"
+    StrCpy $EDITOR "$PROGRAMFILES64\Notepad++\notepad++.exe"
+    ${IfNot} ${FileExists} "$EDITOR"
+      StrCpy $EDITOR "notepad.exe"
+    ${EndIf}
   ${EndIf}
 
   Call ParseCmdLine
@@ -682,7 +682,6 @@ Function CheckRunCmdA
     StrCpy $runcmda "t"
     SetOutPath "$INSTDIR\bin"
     !insertmacro FileExe "bin\runcmda.exe" ""
-    Delete "$INSTDIR\bin\runcmda.exe.manifest" ; TODO: Remove after smartmontools 6.5
   ${EndIf}
 FunctionEnd
 

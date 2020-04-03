@@ -3,27 +3,22 @@
  *
  * Home page of code is: http://www.smartmontools.org
  *
- * Copyright (C) 2012-15 Christian Franke
+ * Copyright (C) 2012-18 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "config.h"
+#define __STDC_FORMAT_MACROS 1 // enable PRI* for C++
+
 #include "ataidentify.h"
 
 const char * ataidentify_cpp_cvsid = "$Id$"
   ATAIDENTIFY_H_CVSID;
 
-#include "int64.h"
 #include "utility.h"
 
+#include <inttypes.h>
 
 // Table 12 of X3T10/0948D (ATA-2) Revision 4c, March 18, 1996
 // Table 9 of X3T13/2008D (ATA-3) Revision 7b, January 27, 1997
@@ -34,7 +29,7 @@ const char * ataidentify_cpp_cvsid = "$Id$"
 // Tables 29 and 39 of T13/1699-D (ATA8-ACS) Revision 6a, September 6, 2008
 // Tables 50 and 61 of T13/2015-D (ACS-2) Revision 7, June 22, 2011
 // Tables 45 and 50 of T13/2161-D (ACS-3) Revision 5, October 28, 2013
-// Table 44 of T13/BSR INCITS 529 (ACS-4) Revision 08, April 28, 2015 (ATAPI removed)
+// Table 55 of T13/BSR INCITS 529 (ACS-4) Revision 20, October 26, 2017 (ATAPI removed)
 
 const char * const identify_descriptions[] = {
   "  0 General configuration",
@@ -121,8 +116,8 @@ const char * const identify_descriptions[] = {
     ". 11 Cmds during sanitize as specified by this standard", // ACS-3
     ". 10 SANITIZE ANTIFREEZE LOCK EXT supported", // ACS-3
     ". 9 Reserved",
-    ". 8 Bits 7:0 are valid",
-    ". 7:0 Current sectors per DRQ on READ/WRITE MULTIPLE",
+    ". 8 Bits 7:0 are valid [OBS-ACS-4]",
+    ". 7:0 Current number of sectors per DRQ [OBS-ACS-4]",
 
   " 60-61 User addressable sectors for 28-bit commands (DWord)",
   " 62 Single Word DMA modes [OBS-3]",
@@ -190,7 +185,9 @@ const char * const identify_descriptions[] = {
     ". 0 Must be set to 0",
 
   " 77 Serial ATA additional capabilities", // ACS-3
-    ". 15:7 Reserved for Serial ATA",
+    ". 15:9 Reserved for Serial ATA",
+    ". 8 Power Disable feature always enabled", // ACS-4
+    ". 7 DevSleep to ReducedPwrState supported", // ACS-4
     ". 6 RECEIVE/SEND FPDMA QUEUED supported",
     ". 5 NCQ Queue Management supported",
     ". 4 NCQ Streaming supported",
@@ -198,7 +195,12 @@ const char * const identify_descriptions[] = {
     ". 0 Must be set to 0",
 
   " 78 Serial ATA features supported",
-    ". 15:8 Reserved for Serial ATA",
+    ". 15:13 Reserved for Serial ATA",
+    ". 12 Power Disable feature supported", // ACS-4
+    ". 11 Rebuild Assist feature set supported", // ACS-4
+    ". 10 Reserved for Serial ATA",
+    ". 9 Hybrid Information supported", // ACS-4
+    ". 8 Device Sleep feature supported", // ACS-4
     ". 7 NCQ Autosense supported", // ACS-3
     ". 6 Software Settings Preservation supported",
     ". 5 Hardware Feature Control supported", // ACS-3
@@ -209,7 +211,11 @@ const char * const identify_descriptions[] = {
     ". 0 Must be set to 0",
 
   " 79 Serial ATA features enabled",
-    ". 15:8 Reserved for Serial ATA",
+    ". 15:12 Reserved for Serial ATA",
+    ". 11 Rebuild Assist feature set enabled", // ACS-4
+    ". 10 Power Disable feature enabled", // ACS-4
+    ". 9 Hybrid Information enabled", // ACS-4
+    ". 8 Device Sleep feature enabled", // ACS-4
     ". 7 Automatic Partial to Slumber transitions enabled", // ACS-3
     ". 6 Software Settings Preservation enabled",
     ". 5 Hardware Feature Control enabled", // ACS-3
@@ -225,9 +231,9 @@ const char * const identify_descriptions[] = {
     ". 10 ACS-3 supported",
     ". 9 ACS-2 supported",
     ". 8 ATA8-ACS supported",
-    ". 7 ATA/ATAPI-7 supported",
-    ". 6 ATA/ATAPI-6 supported",
-    ". 5 ATA/ATAPI-5 supported",
+    ". 7 ATA/ATAPI-7 supported [OBS-ACS-4]",
+    ". 6 ATA/ATAPI-6 supported [OBS-ACS-4]",
+    ". 5 ATA/ATAPI-5 supported [OBS-ACS-4]",
     ". 4 ATA/ATAPI-4 supported [OBS-8]",
     ". 3 ATA-3 supported [OBS-7]",
     ". 2 ATA-2 supported [OBS-6]",
@@ -278,10 +284,10 @@ const char * const identify_descriptions[] = {
     ". 10 URG bit for WRITE STREAM (DMA) EXT supported [OBS-8]",
     ". 9 URG bit for READ STREAM (DMA) EXT supported [OBS-8]",
     ". 8 64-bit World Wide Name supported",
-    ". 7 WRITE DMA QUEUED FUA EXT supported",
+    ". 7 WRITE DMA QUEUED FUA EXT supported [OBS-ACS-2]",
     ". 6 WRITE DMA/MULTIPLE FUA EXT supported",
     ". 5 GPL feature set supported",
-    ". 4 Streaming feature set supported [OBS-ACS-3]",
+    ". 4 Streaming feature set supported",
     ". 3 Media Card Pass Through Command supported [OBS-ACS-2]",
     ". 2 Media serial number supported [RES-ACS-3]",
     ". 1 SMART self-test supported",
@@ -406,7 +412,7 @@ const char * const identify_descriptions[] = {
     ". 3:0 2^X logical sectors per physical sector",
 
   "107 Inter-seek delay for ISO 7779 acoustic testing",
-  "108-111 64-bit World Wide Name",
+  "108-111 World Wide Name",
   "112-115 Reserved", // ATA-7: Reserved for world wide name extension to 128 bits
   "116 Reserved for TLC [OBS-ACS-3]",
   "117-118 Logical sector size (DWord)",
@@ -471,7 +477,7 @@ const char * const identify_descriptions[] = {
 
   "168 Form factor",
     ". 15:4 Reserved",
-    ". 3:0 Nominal form factor: -, 5.25, 3.5, 2.5, 1.8, <1.8",
+    ". 3:0 Nominal form factor: -, 5.25, 3.5, 2.5, 1.8, ...", // <1.8, ACS-4: mSATA, M.2, ...
 
   "169 DATA SET MANAGEMENT command support",
     ". 15:1 Reserved",
@@ -527,10 +533,11 @@ const char * const identify_descriptions[] = {
 
   "222 Transport major version number",
     ". 15:12 Transport: 0x0 = Parallel, 0x1 = Serial, 0xe = PCIe", // PCIe: ACS-4
-    ". 11:8 Reserved    | Reserved",
-    ". 7 Reserved    | SATA 3.2",
-    ". 6 Reserved    | SATA 3.1",
-    ". 5 Reserved    | SATA 3.0",
+    ". 11:9 Reserved    | Reserved",
+    ". 8 Reserved    | SATA 3.3", // ACS-4
+    ". 7 Reserved    | SATA 3.2", // ACS-4
+    ". 6 Reserved    | SATA 3.1", // ACS-3
+    ". 5 Reserved    | SATA 3.0", // ACS-2
     ". 4 Reserved    | SATA 2.6",
     ". 3 Reserved    | SATA 2.5",
     ". 2 Reserved    | SATA II: Extensions",
@@ -626,7 +633,7 @@ void ata_print_identify_data(const void * id, bool all_words, int bit_level)
     if (bit >= 0) {
       int b;
       if (bit2 >= 0)
-        b = (w >> bit2) & ~(~0 << (bit-bit2+1));
+        b = (w >> bit2) & ~(~0U << (bit-bit2+1));
       else
         b = (w >> bit) & 1;
 

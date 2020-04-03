@@ -3,16 +3,9 @@
  *
  * Home page of code is: http://www.smartmontools.org
  *
- * Copyright (C) 2004-14 Christian Franke <smartmontools-support@lists.sourceforge.net>
+ * Copyright (C) 2004-18 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #define WINVER 0x0600
@@ -465,120 +458,6 @@ int daemon_detach(const char * ident)
 
 
 /////////////////////////////////////////////////////////////////////////////
-
-// Spawn a command and redirect <inpbuf >outbuf
-// return command's exitcode or -1 on error
-
-int daemon_spawn(const char * cmd,
-                 const char * inpbuf, int inpsize,
-                 char *       outbuf, int outsize )
-{
-  HANDLE self = GetCurrentProcess();
-
-  // Create stdin pipe with inheritable read side
-  SECURITY_ATTRIBUTES sa;
-  memset(&sa, 0, sizeof(sa)); sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-  HANDLE pipe_inp_r, pipe_inp_w, h;
-  if (!CreatePipe(&pipe_inp_r, &h, &sa/*inherit*/, inpsize*2+13))
-    return -1;
-  if (!DuplicateHandle(self, h, self, &pipe_inp_w,
-    0, FALSE/*!inherit*/, DUPLICATE_SAME_ACCESS|DUPLICATE_CLOSE_SOURCE)) {
-    CloseHandle(pipe_inp_r);
-    return -1;
-  }
-
-  // Create stdout pipe with inheritable write side
-  memset(&sa, 0, sizeof(sa)); sa.nLength = sizeof(sa);
-  sa.bInheritHandle = TRUE;
-  HANDLE pipe_out_w;
-  if (!CreatePipe(&h, &pipe_out_w, &sa/*inherit*/, outsize)) {
-    CloseHandle(pipe_inp_r); CloseHandle(pipe_inp_w);
-    return -1;
-  }
-
-  HANDLE pipe_out_r;
-  if (!DuplicateHandle(self, h, self, &pipe_out_r,
-    GENERIC_READ, FALSE/*!inherit*/, DUPLICATE_CLOSE_SOURCE)) {
-    CloseHandle(pipe_out_w); CloseHandle(pipe_inp_r); CloseHandle(pipe_inp_w);
-    return -1;
-  }
-
-  // Create stderr handle as dup of stdout write side
-  HANDLE pipe_err_w;
-  if (!DuplicateHandle(self, pipe_out_w, self, &pipe_err_w,
-    0, TRUE/*inherit*/, DUPLICATE_SAME_ACCESS)) {
-    CloseHandle(pipe_out_r); CloseHandle(pipe_out_w);
-    CloseHandle(pipe_inp_r); CloseHandle(pipe_inp_w);
-    return -1;
-  }
-
-  // Create process with pipes as stdio
-  STARTUPINFO si;
-  memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
-  si.hStdInput  = pipe_inp_r;
-  si.hStdOutput = pipe_out_w;
-  si.hStdError  = pipe_err_w;
-  si.dwFlags = STARTF_USESTDHANDLES;
-  PROCESS_INFORMATION pi;
-  if (!CreateProcessA(
-    NULL, (char*)cmd,
-    NULL, NULL, TRUE/*inherit*/,
-    CREATE_NO_WINDOW, // DETACHED_PROCESS does not work
-    NULL, NULL, &si, &pi)) {
-    CloseHandle(pipe_err_w);
-    CloseHandle(pipe_out_r); CloseHandle(pipe_out_w);
-    CloseHandle(pipe_inp_r); CloseHandle(pipe_inp_w);
-    return -1;
-  }
-  CloseHandle(pi.hThread);
-  // Close inherited handles
-  CloseHandle(pipe_inp_r);
-  CloseHandle(pipe_out_w);
-  CloseHandle(pipe_err_w);
-
-  // Copy inpbuf to stdin
-  // convert \n => \r\n
-  DWORD num_io;
-  int i;
-  for (i = 0; i < inpsize; ) {
-    int len = 0;
-    while (i+len < inpsize && inpbuf[i+len] != '\n')
-      len++;
-    if (len > 0)
-      WriteFile(pipe_inp_w, inpbuf+i, len, &num_io, NULL);
-    i += len;
-    if (i < inpsize) {
-      WriteFile(pipe_inp_w, "\r\n", 2, &num_io, NULL);
-      i++;
-    }
-  }
-  CloseHandle(pipe_inp_w);
-
-  // Copy stdout to output buffer until full, rest to /dev/null
-  // convert \r\n => \n
-  for (i = 0; ; ) {
-    char buf[256];
-    if (!ReadFile(pipe_out_r, buf, sizeof(buf), &num_io, NULL) || num_io == 0)
-      break;
-    for (int j = 0; i < outsize-1 && j < (int)num_io; j++) {
-      if (buf[j] != '\r')
-        outbuf[i++] = buf[j];
-    }
-  }
-  outbuf[i] = 0;
-  CloseHandle(pipe_out_r);
-
-  // Wait for process exitcode
-  DWORD exitcode = 42;
-  WaitForSingleObject(pi.hProcess, INFINITE);
-  GetExitCodeProcess(pi.hProcess, &exitcode);
-  CloseHandle(pi.hProcess);
-  return exitcode;
-}
-
-
-/////////////////////////////////////////////////////////////////////////////
 // Initd Functions
 
 static int wait_signaled(HANDLE h, int seconds)
@@ -985,7 +864,7 @@ static int svcadm_main(const char * ident, const daemon_winsvc_options * svc_opt
       SERVICE_WIN32_OWN_PROCESS,
       SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, path,
       NULL/*no load ordering*/, NULL/*no tag id*/,
-      ""/*no depedencies*/, NULL/*local system account*/, NULL/*no pw*/))) {
+      ""/*no dependencies*/, NULL/*local system account*/, NULL/*no pw*/))) {
       if ((err = GetLastError()) == ERROR_SERVICE_EXISTS)
         puts(" the service is already installed");
       else if (err == ERROR_SERVICE_MARKED_FOR_DELETE)

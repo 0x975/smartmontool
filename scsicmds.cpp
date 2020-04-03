@@ -1,24 +1,13 @@
 /*
  * scsicmds.cpp
  *
- * Home page of code is: http://www.smartmontools.org
+ * Home page of code is: https://www.smartmontools.org
  *
  * Copyright (C) 2002-8 Bruce Allen
  * Copyright (C) 1999-2000 Michael Cornwell <cornwell@acm.org>
- * Copyright (C) 2003-16 Douglas Gilbert <dgilbert@interlog.com>
+ * Copyright (C) 2003-18 Douglas Gilbert <dgilbert@interlog.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
- * This code was originally developed as a Senior Thesis by Michael Cornwell
- * at the Concurrent Systems Laboratory (now part of the Storage Systems
- * Research Center), Jack Baskin School of Engineering, University of
- * California, Santa Cruz. http://ssrc.soe.ucsc.edu/
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  *
  * In the SCSI world "SMART" is a dead or withdrawn standard. In recent
@@ -41,14 +30,16 @@
 #include <ctype.h>
 
 #include "config.h"
-#include "int64.h"
+
 #include "scsicmds.h"
-#include "atacmds.h" // FIXME: for smart_command_set only
 #include "dev_interface.h"
 #include "utility.h"
+#include "sg_unaligned.h"
 
 const char *scsicmds_c_cvsid="$Id$"
   SCSICMDS_H_CVSID;
+
+static const char * logSenStr = "Log Sense";
 
 // Print SCSI debug messages?
 unsigned char scsi_debugmode = 0;
@@ -62,7 +53,7 @@ supported_vpd_pages::supported_vpd_pages(scsi_device * device) : num_valid(0)
     memset(b, 0, sizeof(b));
     if (device && (0 == scsiInquiryVpd(device, SCSI_VPD_SUPPORTED_VPD_PAGES,
                    b, sizeof(b)))) {
-        num_valid = (b[2] << 8) + b[3];
+        num_valid = sg_get_unaligned_be16(b + 2);
         int n = sizeof(pages);
         if (num_valid > n)
             num_valid = n;
@@ -82,11 +73,11 @@ supported_vpd_pages::is_supported(int vpd_page_num) const
     return false;
 }
 
-/* output binary in hex and optionally ascii */
+/* output binary in ASCII hex and optionally ASCII. Uses pout() for output. */
 void
-dStrHex(const char* str, int len, int no_ascii)
+dStrHex(const uint8_t * up, int len, int no_ascii)
 {
-    const char* p = str;
+    const uint8_t * p = up;
     char buff[82];
     int a = 0;
     const int bpstart = 5;
@@ -105,11 +96,11 @@ dStrHex(const char* str, int len, int no_ascii)
 
     for(i = 0; i < len; i++)
     {
-        unsigned char c = *p++;
+        uint8_t c = *p++;
         bpos += 3;
         if (bpos == (bpstart + (9 * 3)))
             bpos++;
-        snprintf(buff+bpos, sizeof(buff)-bpos, "%.2x", (int)(unsigned char)c);
+        snprintf(buff+bpos, sizeof(buff)-bpos, "%.2x", (unsigned int)c);
         buff[bpos + 2] = ' ';
         if (no_ascii)
             buff[cpos++] = ' ';
@@ -141,8 +132,76 @@ dStrHex(const char* str, int len, int no_ascii)
     }
 }
 
+/* This is a heuristic that takes into account the command bytes and length
+ * to decide whether the presented unstructured sequence of bytes could be
+ * a SCSI command. If so it returns true otherwise false. Vendor specific
+ * SCSI commands (i.e. opcodes from 0xc0 to 0xff), if presented, are assumed
+ * to follow SCSI conventions (i.e. length of 6, 10, 12 or 16 bytes). The
+ * only SCSI commands considered above 16 bytes of length are the Variable
+ * Length Commands (opcode 0x7f) and the XCDB wrapped commands (opcode 0x7e).
+ * Both have an inbuilt length field which can be cross checked with clen.
+ * No NVMe commands (64 bytes long plus some extra added by some OSes) have
+ * opcodes 0x7e or 0x7f yet. ATA is register based but SATA has FIS
+ * structures that are sent across the wire. The FIS register structure is
+ * used to move a command from a SATA host to device, but the ATA 'command'
+ * is not the first byte. So it is harder to say what will happen if a
+ * FIS structure is presented as a SCSI command, hopefully there is a low
+ * probability this function will yield true in that case. */
+bool
+is_scsi_cdb(const uint8_t * cdbp, int clen)
+{
+    int ilen, sa;
+    uint8_t opcode;
+    uint8_t top3bits;
+
+    if (clen < 6)
+        return false;
+    opcode = cdbp[0];
+    top3bits = opcode >> 5;
+    if (0x3 == top3bits) {      /* Opcodes 0x60 to 0x7f */
+        if ((clen < 12) || (clen % 4))
+            return false;       /* must be modulo 4 and 12 or more bytes */
+        switch (opcode) {
+        case 0x7e:      /* Extended cdb (XCDB) */
+            ilen = 4 + sg_get_unaligned_be16(cdbp + 2);
+            return (ilen == clen);
+        case 0x7f:      /* Variable Length cdb */
+            ilen = 8 + cdbp[7];
+            sa = sg_get_unaligned_be16(cdbp + 8);
+            /* service action (sa) 0x0 is reserved */
+            return ((ilen == clen) && sa);
+        default:
+            return false;
+        }
+    } else if (clen <= 16) {
+        switch (clen) {
+        case 6:
+            if (top3bits > 0x5)         /* vendor */
+                return true;
+            return (0x0 == top3bits);   /* 6 byte cdb */
+        case 10:
+            if (top3bits > 0x5)         /* vendor */
+                return true;
+            return ((0x1 == top3bits) || (0x2 == top3bits)); /* 10 byte cdb */
+        case 16:
+            if (top3bits > 0x5)         /* vendor */
+                return true;
+            return (0x4 == top3bits);   /* 16 byte cdb */
+        case 12:
+            if (top3bits > 0x5)         /* vendor */
+                return true;
+            return (0x5 == top3bits);   /* 12 byte cdb */
+        default:
+            return false;
+        }
+    }
+    /* NVMe probably falls out here, clen > 16 and (opcode < 0x60 or
+     * opcode > 0x7f). */
+    return false;
+}
+
 struct scsi_opcode_name {
-    UINT8 opcode;
+    uint8_t opcode;
     const char * name;
 };
 
@@ -174,7 +233,7 @@ static const char * vendor_specific = "<vendor specific>";
 /* Need to expand to take service action into account. For commands
  * of interest the service action is in the 2nd command byte */
 const char *
-scsi_get_opcode_name(UINT8 opcode)
+scsi_get_opcode_name(uint8_t opcode)
 {
     int len = sizeof(opcode_name_arr) / sizeof(opcode_name_arr[0]);
 
@@ -439,30 +498,33 @@ scsi_decode_lu_dev_id(const unsigned char * b, int blen, char * s, int slen,
 }
 
 /* Sends LOG SENSE command. Returns 0 if ok, 1 if device NOT READY, 2 if
-   command not supported, 3 if field (within command) not supported or
-   returns negated errno.  SPC-3 sections 6.6 and 7.2 (rec 22a).
-   N.B. Sets PC==1 to fetch "current cumulative" log pages.
-   If known_resp_len > 0 then a single fetch is done for this response
-   length. If known_resp_len == 0 then twin fetches are performed, the
-   first to deduce the response length, then send the same command again
-   requesting the deduced response length. This protects certain fragile
-   HBAs. The twin fetch technique should not be used with the TapeAlert
-   log page since it clears its state flags after each fetch. */
+ * command not supported, 3 if field (within command) not supported or
+ * returns negated errno.  SPC-3 sections 6.6 and 7.2 (rec 22a).
+ * N.B. Sets PC==1 to fetch "current cumulative" log pages.
+ * If known_resp_len > 0 then a single fetch is done for this response
+ * length. If known_resp_len == 0 then twin fetches are performed, the
+ * first to deduce the response length, then send the same command again
+ * requesting the deduced response length. This protects certain fragile
+ * HBAs. The twin fetch technique should not be used with the TapeAlert
+ * log page since it clears its state flags after each fetch. If
+ * known_resp_len < 0 then does single fetch for BufLen bytes. */
 int
-scsiLogSense(scsi_device * device, int pagenum, int subpagenum, UINT8 *pBuf,
+scsiLogSense(scsi_device * device, int pagenum, int subpagenum, uint8_t *pBuf,
              int bufLen, int known_resp_len)
 {
+    int pageLen;
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[10];
-    UINT8 sense[32];
-    int pageLen;
+    uint8_t cdb[10];
+    uint8_t sense[32];
 
     if (known_resp_len > bufLen)
         return -EIO;
     if (known_resp_len > 0)
         pageLen = known_resp_len;
-    else {
+    else if (known_resp_len < 0)
+        pageLen = bufLen;
+    else {      /* 0 == known_resp_len */
         /* Starting twin fetch strategy: first fetch to find respone length */
         pageLen = 4;
         if (pageLen > bufLen)
@@ -476,10 +538,9 @@ scsiLogSense(scsi_device * device, int pagenum, int subpagenum, UINT8 *pBuf,
         io_hdr.dxfer_len = pageLen;
         io_hdr.dxferp = pBuf;
         cdb[0] = LOG_SENSE;
-        cdb[2] = 0x40 | (pagenum & 0x3f);  /* Page control (PC)==1 */
-        cdb[3] = subpagenum;
-        cdb[7] = (pageLen >> 8) & 0xff;
-        cdb[8] = pageLen & 0xff;
+        cdb[2] = 0x40 | (pagenum & 0x3f);       /* Page control (PC)==1 */
+        cdb[3] = subpagenum;                    /* 0 for no sub-page */
+        sg_put_unaligned_be16(pageLen, cdb + 7);
         io_hdr.cmnd = cdb;
         io_hdr.cmnd_len = sizeof(cdb);
         io_hdr.sensep = sense;
@@ -495,9 +556,10 @@ scsiLogSense(scsi_device * device, int pagenum, int subpagenum, UINT8 *pBuf,
         /* sanity check on response */
         if ((SUPPORTED_LPAGES != pagenum) && ((pBuf[0] & 0x3f) != pagenum))
             return SIMPLE_ERR_BAD_RESP;
-        if (0 == ((pBuf[2] << 8) + pBuf[3]))
+        uint16_t u = sg_get_unaligned_be16(pBuf + 2);
+        if (0 == u)
             return SIMPLE_ERR_BAD_RESP;
-        pageLen = (pBuf[2] << 8) + pBuf[3] + 4;
+        pageLen = u + 4;
         if (4 == pageLen)  /* why define a lpage with no payload? */
             pageLen = 252; /* some IBM tape drives don't like double fetch */
         /* some SCSI HBA don't like "odd" length transfers */
@@ -514,8 +576,8 @@ scsiLogSense(scsi_device * device, int pagenum, int subpagenum, UINT8 *pBuf,
     io_hdr.dxferp = pBuf;
     cdb[0] = LOG_SENSE;
     cdb[2] = 0x40 | (pagenum & 0x3f);  /* Page control (PC)==1 */
-    cdb[7] = (pageLen >> 8) & 0xff;
-    cdb[8] = pageLen & 0xff;
+    cdb[3] = subpagenum;
+    sg_put_unaligned_be16(pageLen, cdb + 7);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -531,7 +593,7 @@ scsiLogSense(scsi_device * device, int pagenum, int subpagenum, UINT8 *pBuf,
     /* sanity check on response */
     if ((SUPPORTED_LPAGES != pagenum) && ((pBuf[0] & 0x3f) != pagenum))
         return SIMPLE_ERR_BAD_RESP;
-    if (0 == ((pBuf[2] << 8) + pBuf[3]))
+    if (0 == sg_get_unaligned_be16(pBuf + 2))
         return SIMPLE_ERR_BAD_RESP;
     return 0;
 }
@@ -543,12 +605,12 @@ scsiLogSense(scsi_device * device, int pagenum, int subpagenum, UINT8 *pBuf,
  * returns negated errno. SPC-4 sections 6.5 and 7.2 (rev 20) */
 int
 scsiLogSelect(scsi_device * device, int pcr, int sp, int pc, int pagenum,
-              int subpagenum, UINT8 *pBuf, int bufLen)
+              int subpagenum, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[10];
-    UINT8 sense[32];
+    uint8_t cdb[10];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -559,8 +621,7 @@ scsiLogSelect(scsi_device * device, int pcr, int sp, int pc, int pagenum,
     cdb[1] = (pcr ? 2 : 0) | (sp ? 1 : 0);
     cdb[2] = ((pc << 6) & 0xc0) | (pagenum & 0x3f);
     cdb[3] = (subpagenum & 0xff);
-    cdb[7] = ((bufLen >> 8) & 0xff);
-    cdb[8] = (bufLen & 0xff);
+    sg_put_unaligned_be16(bufLen, cdb + 7);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -579,12 +640,12 @@ scsiLogSelect(scsi_device * device, int pcr, int sp, int pc, int pagenum,
  * SPC-3 sections 6.9 and 7.4 (rev 22a) [mode subpage==0] */
 int
 scsiModeSense(scsi_device * device, int pagenum, int subpagenum, int pc,
-              UINT8 *pBuf, int bufLen)
+              uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[6];
-    UINT8 sense[32];
+    uint8_t cdb[6];
+    uint8_t sense[32];
 
     if ((bufLen < 0) || (bufLen > 255))
         return -EINVAL;
@@ -633,12 +694,12 @@ scsiModeSense(scsi_device * device, int pagenum, int subpagenum, int pc,
  * 3 if field in command not supported, 4 if bad parameter to command
  * or returns negated errno. SPC-3 sections 6.7 and 7.4 (rev 22a) */
 int
-scsiModeSelect(scsi_device * device, int sp, UINT8 *pBuf, int bufLen)
+scsiModeSelect(scsi_device * device, int sp, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[6];
-    UINT8 sense[32];
+    uint8_t cdb[6];
+    uint8_t sense[32];
     int pg_offset, pg_len, hdr_plus_1_pg;
 
     pg_offset = 4 + pBuf[3];
@@ -648,7 +709,7 @@ scsiModeSelect(scsi_device * device, int sp, UINT8 *pBuf, int bufLen)
     hdr_plus_1_pg = pg_offset + pg_len;
     if (hdr_plus_1_pg > bufLen)
         return -EINVAL;
-    pBuf[0] = 0;    /* Length of returned mode sense data reserved for SELECT */
+    pBuf[0] = 0;  /* Length of returned mode sense data reserved for SELECT */
     pBuf[pg_offset] &= 0x7f;    /* Mask out PS bit from byte 0 of page data */
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -676,12 +737,12 @@ scsiModeSelect(scsi_device * device, int sp, UINT8 *pBuf, int bufLen)
  * SPC-3 sections 6.10 and 7.4 (rev 22a) [mode subpage==0] */
 int
 scsiModeSense10(scsi_device * device, int pagenum, int subpagenum, int pc,
-                UINT8 *pBuf, int bufLen)
+                uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[10];
-    UINT8 sense[32];
+    uint8_t cdb[10];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -691,8 +752,7 @@ scsiModeSense10(scsi_device * device, int pagenum, int subpagenum, int pc,
     cdb[0] = MODE_SENSE_10;
     cdb[2] = (pc << 6) | (pagenum & 0x3f);
     cdb[3] = subpagenum;
-    cdb[7] = (bufLen >> 8) & 0xff;
-    cdb[8] = bufLen & 0xff;
+    sg_put_unaligned_be16(bufLen, cdb + 7);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -729,15 +789,15 @@ scsiModeSense10(scsi_device * device, int pagenum, int subpagenum, int pc,
  * in command not supported, 4 if bad parameter to command or returns
  * negated errno. SPC-3 sections 6.8 and 7.4 (rev 22a) */
 int
-scsiModeSelect10(scsi_device * device, int sp, UINT8 *pBuf, int bufLen)
+scsiModeSelect10(scsi_device * device, int sp, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[10];
-    UINT8 sense[32];
+    uint8_t cdb[10];
+    uint8_t sense[32];
     int pg_offset, pg_len, hdr_plus_1_pg;
 
-    pg_offset = 8 + (pBuf[6] << 8) + pBuf[7];
+    pg_offset = 8 + sg_get_unaligned_be16(pBuf + 6);
     if (pg_offset + 2 >= bufLen)
         return -EINVAL;
     pg_len = pBuf[pg_offset + 1] + 2;
@@ -754,7 +814,8 @@ scsiModeSelect10(scsi_device * device, int sp, UINT8 *pBuf, int bufLen)
     io_hdr.dxferp = pBuf;
     cdb[0] = MODE_SELECT_10;
     cdb[1] = 0x10 | (sp & 1);      /* set PF (page format) bit always */
-    cdb[8] = hdr_plus_1_pg; /* make sure only one page sent */
+    /* make sure only one page sent */
+    sg_put_unaligned_be16(hdr_plus_1_pg, cdb + 7);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -771,12 +832,12 @@ scsiModeSelect10(scsi_device * device, int sp, UINT8 *pBuf, int bufLen)
  * bufLen should be 36 for unsafe devices (like USB mass storage stuff)
  * otherwise they can lock up! SPC-3 sections 6.4 and 7.6 (rev 22a) */
 int
-scsiStdInquiry(scsi_device * device, UINT8 *pBuf, int bufLen)
+scsiStdInquiry(scsi_device * device, uint8_t *pBuf, int bufLen)
 {
     struct scsi_sense_disect sinfo;
     struct scsi_cmnd_io io_hdr;
-    UINT8 cdb[6];
-    UINT8 sense[32];
+    uint8_t cdb[6];
+    uint8_t sense[32];
 
     if ((bufLen < 0) || (bufLen > 1023))
         return -EINVAL;
@@ -786,8 +847,7 @@ scsiStdInquiry(scsi_device * device, UINT8 *pBuf, int bufLen)
     io_hdr.dxfer_len = bufLen;
     io_hdr.dxferp = pBuf;
     cdb[0] = INQUIRY;
-    cdb[3] = (bufLen >> 8) & 0xff;
-    cdb[4] = (bufLen & 0xff);
+    sg_put_unaligned_be16(bufLen, cdb + 3);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -805,12 +865,12 @@ scsiStdInquiry(scsi_device * device, UINT8 *pBuf, int bufLen)
  * supported, 5 if response indicates that EVPD bit ignored or returns
  * negated errno. SPC-3 section 6.4 and 7.6 (rev 22a) */
 int
-scsiInquiryVpd(scsi_device * device, int vpd_page, UINT8 *pBuf, int bufLen)
+scsiInquiryVpd(scsi_device * device, int vpd_page, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[6];
-    UINT8 sense[32];
+    uint8_t cdb[6];
+    uint8_t sense[32];
     int res;
 
     /* Assume SCSI_VPD_SUPPORTED_VPD_PAGES is first VPD page fetched */
@@ -832,8 +892,7 @@ try_again:
     cdb[0] = INQUIRY;
     cdb[1] = 0x1;       /* set EVPD bit (enable Vital Product Data) */
     cdb[2] = vpd_page;
-    cdb[3] = (bufLen >> 8) & 0xff;
-    cdb[4] = (bufLen & 0xff);
+    sg_put_unaligned_be16(bufLen, cdb + 3);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -870,17 +929,18 @@ int
 scsiRequestSense(scsi_device * device, struct scsi_sense_disect * sense_info)
 {
     struct scsi_cmnd_io io_hdr;
-    UINT8 cdb[6];
-    UINT8 sense[32];
-    UINT8 buff[18];
+    uint8_t cdb[6];
+    uint8_t sense[32];
+    uint8_t buff[18];
+    int sz_buff = sizeof(buff);
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
     io_hdr.dxfer_dir = DXFER_FROM_DEVICE;
-    io_hdr.dxfer_len = sizeof(buff);
+    io_hdr.dxfer_len = sz_buff;
     io_hdr.dxferp = buff;
     cdb[0] = REQUEST_SENSE;
-    cdb[4] = sizeof(buff);
+    cdb[4] = sz_buff;
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -890,7 +950,7 @@ scsiRequestSense(scsi_device * device, struct scsi_sense_disect * sense_info)
     if (!device->scsi_pass_through(&io_hdr))
       return -device->get_errno();
     if (sense_info) {
-        UINT8 resp_code = buff[0] & 0x7f;
+        uint8_t resp_code = buff[0] & 0x7f;
         sense_info->resp_code = resp_code;
         sense_info->sense_key = buff[2] & 0xf;
         sense_info->asc = 0;
@@ -902,7 +962,7 @@ scsiRequestSense(scsi_device * device, struct scsi_sense_disect * sense_info)
                 sense_info->ascq = buff[13];
             }
         }
-    // fill progrss indicator, if available
+    // fill progress indicator, if available
     sense_info->progress = -1;
     switch (resp_code) {
       const unsigned char * ucp;
@@ -910,12 +970,11 @@ scsiRequestSense(scsi_device * device, struct scsi_sense_disect * sense_info)
       case 0x70:
       case 0x71:
           sk = (buff[2] & 0xf);
-          if ((sizeof(buff) < 18) ||
-              ((SCSI_SK_NO_SENSE != sk) && (SCSI_SK_NOT_READY != sk))) {
+          if (! ((SCSI_SK_NO_SENSE == sk) || (SCSI_SK_NOT_READY == sk))) {
               break;
           }
           if (buff[15] & 0x80) {        /* SKSV bit set */
-              sense_info->progress = (buff[16] << 8) + buff[17];
+              sense_info->progress = sg_get_unaligned_be16(buff + 16);
               break;
           } else {
               break;
@@ -925,13 +984,13 @@ scsiRequestSense(scsi_device * device, struct scsi_sense_disect * sense_info)
           /* sense key specific progress (0x2) or progress descriptor (0xa) */
           sk = (buff[1] & 0xf);
           sk_pr = (SCSI_SK_NO_SENSE == sk) || (SCSI_SK_NOT_READY == sk);
-          if (sk_pr && ((ucp = sg_scsi_sense_desc_find(buff, sizeof(buff), 2))) &&
+          if (sk_pr && ((ucp = sg_scsi_sense_desc_find(buff, sz_buff, 2))) &&
               (0x6 == ucp[1]) && (0x80 & ucp[4])) {
-              sense_info->progress = (ucp[5] << 8) + ucp[6];
+              sense_info->progress = sg_get_unaligned_be16(ucp + 5);
               break;
-          } else if (((ucp = sg_scsi_sense_desc_find(buff, sizeof(buff), 0xa))) &&
+          } else if (((ucp = sg_scsi_sense_desc_find(buff, sz_buff, 0xa))) &&
                      ((0x6 == ucp[1]))) {
-              sense_info->progress = (ucp[6] << 8) + ucp[7];
+              sense_info->progress = sg_get_unaligned_be16(ucp + 6);
               break;
           } else
               break;
@@ -946,13 +1005,13 @@ scsiRequestSense(scsi_device * device, struct scsi_sense_disect * sense_info)
  * not supported, 3 if field in command not supported or returns negated
  * errno. SPC-3 section 6.28 (rev 22a) */
 int
-scsiSendDiagnostic(scsi_device * device, int functioncode, UINT8 *pBuf,
+scsiSendDiagnostic(scsi_device * device, int functioncode, uint8_t *pBuf,
                    int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[6];
-    UINT8 sense[32];
+    uint8_t cdb[6];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -966,8 +1025,7 @@ scsiSendDiagnostic(scsi_device * device, int functioncode, UINT8 *pBuf,
         cdb[1] = (functioncode & 0x7) << 5; /* SelfTest _code_ */
     else   /* SCSI_DIAG_NO_SELF_TEST == functioncode */
         cdb[1] = 0x10;  /* PF bit */
-    cdb[3] = (bufLen >> 8) & 0xff;
-    cdb[4] = bufLen & 0xff;
+    sg_put_unaligned_be16(bufLen, cdb + 3);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -986,8 +1044,8 @@ static int
 _testunitready(scsi_device * device, struct scsi_sense_disect * sinfo)
 {
     struct scsi_cmnd_io io_hdr;
-    UINT8 cdb[6];
-    UINT8 sense[32];
+    uint8_t cdb[6];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -1035,12 +1093,12 @@ scsiTestUnitReady(scsi_device * device)
  * negated errno. SBC-2 section 5.12 (rev 16) */
 int
 scsiReadDefect10(scsi_device * device, int req_plist, int req_glist,
-                 int dl_format, UINT8 *pBuf, int bufLen)
+                 int dl_format, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[10];
-    UINT8 sense[32];
+    uint8_t cdb[10];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -1050,8 +1108,7 @@ scsiReadDefect10(scsi_device * device, int req_plist, int req_glist,
     cdb[0] = READ_DEFECT_10;
     cdb[2] = (unsigned char)(((req_plist << 4) & 0x10) |
                ((req_glist << 3) & 0x8) | (dl_format & 0x7));
-    cdb[7] = (bufLen >> 8) & 0xff;
-    cdb[8] = bufLen & 0xff;
+    sg_put_unaligned_be16(bufLen, cdb + 7);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -1073,12 +1130,12 @@ scsiReadDefect10(scsi_device * device, int req_plist, int req_glist,
  * negated errno. SBC-3 section 5.18 (rev 35; vale Mark Evans) */
 int
 scsiReadDefect12(scsi_device * device, int req_plist, int req_glist,
-                 int dl_format, int addrDescIndex, UINT8 *pBuf, int bufLen)
+                 int dl_format, int addrDescIndex, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[12];
-    UINT8 sense[32];
+    uint8_t cdb[12];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -1088,14 +1145,8 @@ scsiReadDefect12(scsi_device * device, int req_plist, int req_glist,
     cdb[0] = READ_DEFECT_12;
     cdb[1] = (unsigned char)(((req_plist << 4) & 0x10) |
                ((req_glist << 3) & 0x8) | (dl_format & 0x7));
-    cdb[2] = (addrDescIndex >> 24) & 0xff;
-    cdb[3] = (addrDescIndex >> 16) & 0xff;
-    cdb[4] = (addrDescIndex >> 8) & 0xff;
-    cdb[5] = addrDescIndex & 0xff;
-    cdb[6] = (bufLen >> 24) & 0xff;
-    cdb[7] = (bufLen >> 16) & 0xff;
-    cdb[8] = (bufLen >> 8) & 0xff;
-    cdb[9] = bufLen & 0xff;
+    sg_put_unaligned_be32(addrDescIndex, cdb + 2);
+    sg_put_unaligned_be32(bufLen, cdb + 6);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -1121,9 +1172,9 @@ scsiReadCapacity10(scsi_device * device, unsigned int * last_lbap,
     int res;
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[10];
-    UINT8 sense[32];
-    UINT8 resp[8];
+    uint8_t cdb[10];
+    uint8_t sense[32];
+    uint8_t resp[8];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -1145,11 +1196,9 @@ scsiReadCapacity10(scsi_device * device, unsigned int * last_lbap,
     if (res)
         return res;
     if (last_lbap)
-        *last_lbap = (resp[0] << 24) | (resp[1] << 16) | (resp[2] << 8) |
-                     resp[3];
+        *last_lbap = sg_get_unaligned_be32(resp + 0);
     if (lb_sizep)
-        *lb_sizep = (resp[4] << 24) | (resp[5] << 16) | (resp[6] << 8) |
-                    resp[7];
+        *lb_sizep = sg_get_unaligned_be32(resp + 4);
     return 0;
 }
 
@@ -1157,12 +1206,12 @@ scsiReadCapacity10(scsi_device * device, unsigned int * last_lbap,
  * if ok, 1 if NOT READY, 2 if command not supported, 3 if field in command
  * not supported or returns negated errno. SBC-3 section 5.16 (rev 26) */
 int
-scsiReadCapacity16(scsi_device * device, UINT8 *pBuf, int bufLen)
+scsiReadCapacity16(scsi_device * device, uint8_t *pBuf, int bufLen)
 {
     struct scsi_cmnd_io io_hdr;
     struct scsi_sense_disect sinfo;
-    UINT8 cdb[16];
-    UINT8 sense[32];
+    uint8_t cdb[16];
+    uint8_t sense[32];
 
     memset(&io_hdr, 0, sizeof(io_hdr));
     memset(cdb, 0, sizeof(cdb));
@@ -1171,10 +1220,7 @@ scsiReadCapacity16(scsi_device * device, UINT8 *pBuf, int bufLen)
     io_hdr.dxferp = pBuf;
     cdb[0] = READ_CAPACITY_16;
     cdb[1] = SAI_READ_CAPACITY_16;
-    cdb[10] = (bufLen >> 24) & 0xff;
-    cdb[11] = (bufLen >> 16) & 0xff;
-    cdb[12] = (bufLen >> 8) & 0xff;
-    cdb[13] = bufLen & 0xff;
+    sg_put_unaligned_be32(bufLen, cdb + 10);
     io_hdr.cmnd = cdb;
     io_hdr.cmnd_len = sizeof(cdb);
     io_hdr.sensep = sense;
@@ -1188,82 +1234,101 @@ scsiReadCapacity16(scsi_device * device, UINT8 *pBuf, int bufLen)
 }
 
 /* Return number of bytes of storage in 'device' or 0 if error. If
- * successful and lb_sizep is not NULL then the logical block size
- * in bytes is written to the location pointed to by lb_sizep. */
+ * successful and lb_sizep is not NULL then the logical block size in bytes
+ * is written to the location pointed to by lb_sizep. If the 'Logical Blocks
+ * per Physical Block Exponent' pointer (lb_per_pb_expp,) is non-null then
+ * the value is written. If 'Protection information Intervals Exponent'*/
 uint64_t
-scsiGetSize(scsi_device * device, unsigned int * lb_sizep,
-            int * lb_per_pb_expp)
+scsiGetSize(scsi_device * device, bool avoid_rcap16,
+            struct scsi_readcap_resp * srrp)
 {
+    bool try_16 = false;
+    bool try_12 = false;
     unsigned int last_lba = 0, lb_size = 0;
     int res;
     uint64_t ret_val = 0;
-    UINT8 rc16resp[32];
+    uint8_t rc16resp[32];
 
-    res = scsiReadCapacity10(device, &last_lba, &lb_size);
-    if (res) {
-        if (scsi_debugmode)
-            pout("scsiGetSize: READ CAPACITY(10) failed, res=%d\n", res);
-        return 0;
+    if (avoid_rcap16) {
+        res = scsiReadCapacity10(device, &last_lba, &lb_size);
+        if (res) {
+            if (scsi_debugmode)
+                pout("%s: READ CAPACITY(10) failed, res=%d\n", __func__, res);
+            try_16 = true;
+        } else {        /* rcap10 succeeded */
+            if (0xffffffff == last_lba) {
+                /* so number of blocks needs > 32 bits to represent */
+                try_16 = true;
+                device->set_rcap16_first();
+            } else {
+                ret_val = last_lba + 1;
+                if (srrp) {
+                    memset(srrp, 0, sizeof(*srrp));
+                    srrp->num_lblocks = ret_val;
+                    srrp->lb_size = lb_size;
+                }
+            }
+        }
     }
-    if (0xffffffff == last_lba) {
+    if (try_16 || (! avoid_rcap16)) {
         res = scsiReadCapacity16(device, rc16resp, sizeof(rc16resp));
         if (res) {
             if (scsi_debugmode)
-                pout("scsiGetSize: READ CAPACITY(16) failed, res=%d\n", res);
+                pout("%s: READ CAPACITY(16) failed, res=%d\n", __func__, res);
+            if (try_16)         /* so already tried rcap10 */
+                return 0;
+            try_12 = true;
+        } else {        /* rcap16 succeeded */
+            bool prot_en;
+            uint8_t  p_type;
+
+            ret_val = sg_get_unaligned_be64(rc16resp + 0) + 1;
+            lb_size = sg_get_unaligned_be32(rc16resp + 8);
+            if (srrp) {         /* writes to all fields */
+                srrp->num_lblocks = ret_val;
+                srrp->lb_size = lb_size;
+                prot_en = !!(0x1 & rc16resp[12]);
+                p_type = ((rc16resp[12] >> 1) & 0x7);
+                srrp->prot_type = prot_en ? (1 + p_type) : 0;
+                srrp->p_i_exp = ((rc16resp[13] >> 4) & 0xf);
+                srrp->lb_p_pb_exp = (rc16resp[13] & 0xf);
+                srrp->lbpme = !!(0x80 & rc16resp[14]);
+                srrp->lbprz = !!(0x40 & rc16resp[14]);
+                srrp->l_a_lba = sg_get_unaligned_be16(rc16resp + 14) & 0x3fff;
+            }
+        }
+    }
+    if (try_12) {  /* case where only rcap16 has been tried and failed */
+        res = scsiReadCapacity10(device, &last_lba, &lb_size);
+        if (res) {
+            if (scsi_debugmode)
+                pout("%s: 2nd READ CAPACITY(10) failed, res=%d\n", __func__,
+                     res);
             return 0;
+        } else {        /* rcap10 succeeded */
+            ret_val = (uint64_t)last_lba + 1;
+            if (srrp) {
+                memset(srrp, 0, sizeof(*srrp));
+                srrp->num_lblocks = ret_val;
+                srrp->lb_size = lb_size;
+            }
         }
-        for (int k = 0; k < 8; ++k) {
-            if (k > 0)
-                ret_val <<= 8;
-            ret_val |= rc16resp[k + 0];
-        }
-        if (lb_per_pb_expp)
-            *lb_per_pb_expp = (rc16resp[13] & 0xf);
-    } else {
-        ret_val = last_lba;
-        if (lb_per_pb_expp)
-            *lb_per_pb_expp = 0;
     }
-    if (lb_sizep)
-        *lb_sizep = lb_size;
-    ++ret_val;  /* last_lba is origin 0 so need to bump to get number of */
-    return ret_val * lb_size;
-}
-
-/* Gets drive Protection and Logical/Physical block information. Writes
- * back bytes 12 to 31 from a READ CAPACITY 16 command to the rc16_12_31p
- * pointer. So rc16_12_31p should point to an array of 20 bytes. Returns 0
- * if ok, 1 if NOT READY, 2 if command not supported, 3 if field in command
- * not supported or returns negated errno. */
-int
-scsiGetProtPBInfo(scsi_device * device, unsigned char * rc16_12_31p)
-{
-    int res;
-    UINT8 rc16resp[32];
-
-    res = scsiReadCapacity16(device, rc16resp, sizeof(rc16resp));
-    if (res) {
-        if (scsi_debugmode)
-            pout("scsiGetSize: READ CAPACITY(16) failed, res=%d\n", res);
-        return res;
-    }
-    if (rc16_12_31p)
-        memcpy(rc16_12_31p, rc16resp + 12, 20);
-    return 0;
+    return (ret_val * lb_size);
 }
 
 /* Offset into mode sense (6 or 10 byte) response that actual mode page
  * starts at (relative to resp[0]). Returns -1 if problem */
 int
-scsiModePageOffset(const UINT8 * resp, int len, int modese_len)
+scsiModePageOffset(const uint8_t * resp, int len, int modese_len)
 {
     int offset = -1;
 
     if (resp) {
         int resp_len, bd_len;
         if (10 == modese_len) {
-            resp_len = (resp[0] << 8) + resp[1] + 2;
-            bd_len = (resp[6] << 8) + resp[7];
+            resp_len = sg_get_unaligned_be16(resp + 0) + 2;
+            bd_len = sg_get_unaligned_be16(resp + 6);
             offset = bd_len + 8;
         } else {
             resp_len = resp[0] + 1;
@@ -1393,7 +1458,7 @@ scsiSetExceptionControlAndWarning(scsi_device * device, int enabled,
 {
     int offset, resp_len;
     int err = 0;
-    UINT8 rout[SCSI_IECMP_RAW_LEN];
+    uint8_t rout[SCSI_IECMP_RAW_LEN];
 
     if ((! iecp) || (! iecp->gotCurrent))
         return -EINVAL;
@@ -1404,28 +1469,22 @@ scsiSetExceptionControlAndWarning(scsi_device * device, int enabled,
     memcpy(rout, iecp->raw_curr, SCSI_IECMP_RAW_LEN);
     /* mask out DPOFUA device specific (disk) parameter bit */
     if (10 == iecp->modese_len) {
-        resp_len = (rout[0] << 8) + rout[1] + 2;
+        resp_len = sg_get_unaligned_be16(rout + 0) + 2;
         rout[3] &= 0xef;
     } else {
         resp_len = rout[0] + 1;
         rout[2] &= 0xef;
     }
-    int sp = (rout[offset] & 0x80) ? 1 : 0; /* PS bit becomes 'SELECT's SP bit */
+    int sp = !! (rout[offset] & 0x80); /* PS bit becomes 'SELECT's SP bit */
     if (enabled) {
         rout[offset + 2] = SCSI_IEC_MP_BYTE2_ENABLED;
         if (scsi_debugmode > 2)
             rout[offset + 2] |= SCSI_IEC_MP_BYTE2_TEST_MASK;
         rout[offset + 3] = SCSI_IEC_MP_MRIE;
-        rout[offset + 4] = (SCSI_IEC_MP_INTERVAL_T >> 24) & 0xff;
-        rout[offset + 5] = (SCSI_IEC_MP_INTERVAL_T >> 16) & 0xff;
-        rout[offset + 6] = (SCSI_IEC_MP_INTERVAL_T >> 8) & 0xff;
-        rout[offset + 7] = SCSI_IEC_MP_INTERVAL_T & 0xff;
-        rout[offset + 8] = (SCSI_IEC_MP_REPORT_COUNT >> 24) & 0xff;
-        rout[offset + 9] = (SCSI_IEC_MP_REPORT_COUNT >> 16) & 0xff;
-        rout[offset + 10] = (SCSI_IEC_MP_REPORT_COUNT >> 8) & 0xff;
-        rout[offset + 11] = SCSI_IEC_MP_REPORT_COUNT & 0xff;
+        sg_put_unaligned_be32(SCSI_IEC_MP_INTERVAL_T, rout + offset + 4);
+        sg_put_unaligned_be32(SCSI_IEC_MP_REPORT_COUNT, rout + offset + 8);
         if (iecp->gotChangeable) {
-            UINT8 chg2 = iecp->raw_chg[offset + 2];
+            uint8_t chg2 = iecp->raw_chg[offset + 2];
 
             rout[offset + 2] = chg2 ? (rout[offset + 2] & chg2) :
                                       iecp->raw_curr[offset + 2];
@@ -1453,7 +1512,7 @@ scsiSetExceptionControlAndWarning(scsi_device * device, int enabled,
             if (iecp->gotChangeable &&
                 (iecp->raw_chg[offset + 2] & DEXCPT_ENABLE))
                 rout[offset + 2] |= DEXCPT_ENABLE;
-                rout[offset + 2] &= TEST_DISABLE;/* clear TEST bit for spec */
+            rout[offset + 2] &= TEST_DISABLE; /* clear TEST bit for spec */
         }
     }
     if (10 == iecp->modese_len)
@@ -1464,9 +1523,9 @@ scsiSetExceptionControlAndWarning(scsi_device * device, int enabled,
 }
 
 int
-scsiGetTemp(scsi_device * device, UINT8 *currenttemp, UINT8 *triptemp)
+scsiGetTemp(scsi_device * device, uint8_t *currenttemp, uint8_t *triptemp)
 {
-    UINT8 tBuf[252];
+    uint8_t tBuf[252];
     int err;
 
     memset(tBuf, 0, sizeof(tBuf));
@@ -1474,7 +1533,8 @@ scsiGetTemp(scsi_device * device, UINT8 *currenttemp, UINT8 *triptemp)
                             sizeof(tBuf), 0))) {
         *currenttemp = 0;
         *triptemp = 0;
-        pout("Log Sense for temperature failed [%s]\n", scsiErrString(err));
+        pout("%s for temperature failed [%s]\n", logSenStr,
+             scsiErrString(err));
         return err;
     }
     *currenttemp = tBuf[9];
@@ -1488,13 +1548,13 @@ scsiGetTemp(scsi_device * device, UINT8 *currenttemp, UINT8 *triptemp)
  * (Celsius) implies that the temperature not available. */
 int
 scsiCheckIE(scsi_device * device, int hasIELogPage, int hasTempLogPage,
-            UINT8 *asc, UINT8 *ascq, UINT8 *currenttemp, UINT8 *triptemp)
+            uint8_t *asc, uint8_t *ascq, uint8_t *currenttemp,
+            uint8_t *triptemp)
 {
-    UINT8 tBuf[252];
+    uint8_t tBuf[252];
     struct scsi_sense_disect sense_info;
     int err;
-    int temperatureSet = 0;
-    UINT8 currTemp, trTemp;
+    uint8_t currTemp, trTemp;
 
     *asc = 0;
     *ascq = 0;
@@ -1505,13 +1565,14 @@ scsiCheckIE(scsi_device * device, int hasIELogPage, int hasTempLogPage,
     if (hasIELogPage) {
         if ((err = scsiLogSense(device, IE_LPAGE, 0, tBuf,
                                 sizeof(tBuf), 0))) {
-            pout("Log Sense failed, IE page [%s]\n", scsiErrString(err));
+            pout("%s failed, IE page [%s]\n", logSenStr, scsiErrString(err));
             return err;
         }
         // pull out page size from response, don't forget to add 4
-        unsigned short pagesize = (unsigned short) ((tBuf[2] << 8) | tBuf[3]) + 4;
+        unsigned short pagesize = sg_get_unaligned_be16(tBuf + 2) + 4;
         if ((pagesize < 4) || tBuf[4] || tBuf[5]) {
-            pout("Log Sense failed, IE page, bad parameter code or length\n");
+            pout("%s failed, IE page, bad parameter code or length\n",
+                 logSenStr);
             return SIMPLE_ERR_BAD_PARAM;
         }
         if (tBuf[7] > 1) {
@@ -1534,7 +1595,7 @@ scsiCheckIE(scsi_device * device, int hasIELogPage, int hasTempLogPage,
     }
     *asc = sense_info.asc;
     *ascq = sense_info.ascq;
-    if ((! temperatureSet) && hasTempLogPage) {
+    if (hasTempLogPage) {
         if (0 == scsiGetTemp(device, &currTemp, &trTemp)) {
             *currenttemp = currTemp;
             *triptemp = trTemp;
@@ -1547,13 +1608,16 @@ scsiCheckIE(scsi_device * device, int hasIELogPage, int hasTempLogPage,
 static const char * TapeAlertsMessageTable[]= {
     " ",
     /* 0x01 */
-   "W: The tape drive is having problems reading data. No data has been lost,\n"
+   "W: The tape drive is having problems reading data. No data has been "
+   "lost,\n"
        "  but there has been a reduction in the performance of the tape.",
     /* 0x02 */
-   "W: The tape drive is having problems writing data. No data has been lost,\n"
+   "W: The tape drive is having problems writing data. No data has been "
+   "lost,\n"
        "  but there has been a reduction in the capacity of the tape.",
     /* 0x03 */
-   "W: The operation has stopped because an error has occurred while reading\n"
+   "W: The operation has stopped because an error has occurred while "
+   "reading\n"
        "  or writing data that the drive cannot correct.",
     /* 0x04 */
    "C: Your data is at risk:\n"
@@ -1568,17 +1632,20 @@ static const char * TapeAlertsMessageTable[]= {
        "  1. Use a good tape to test the drive.\n"
        "  2. If problem persists, call the tape drive supplier helpline.",
     /* 0x07 */
-   "W: The tape cartridge has reached the end of its calculated useful life:\n"
+   "W: The tape cartridge has reached the end of its calculated useful "
+   "life:\n"
        "  1. Copy data you need to another tape.\n"
        "  2. Discard the old tape.",
     /* 0x08 */
-   "W: The tape cartridge is not data-grade. Any data you back up to the tape\n"
+   "W: The tape cartridge is not data-grade. Any data you back up to the "
+   "tape\n"
        "  is at risk. Replace the cartridge with a data-grade tape.",
     /* 0x09 */
    "C: You are trying to write to a write-protected cartridge. Remove the\n"
        "  write-protection or use another tape.",
     /* 0x0a */
-   "I: You cannot eject the cartridge because the tape drive is in use. Wait\n"
+   "I: You cannot eject the cartridge because the tape drive is in use. "
+   "Wait\n"
        "  until the operation is complete before ejecting the cartridge.",
     /* 0x0b */
    "I: The tape in the drive is a cleaning cartridge.",
@@ -1586,27 +1653,32 @@ static const char * TapeAlertsMessageTable[]= {
    "I: You have tried to load a cartridge of a type which is not supported\n"
        "  by this drive.",
     /* 0x0d */
-   "C: The operation has failed because the tape in the drive has experienced\n"
+   "C: The operation has failed because the tape in the drive has "
+   "experienced\n"
        "  a mechanical failure:\n"
        "  1. Discard the old tape.\n"
        "  2. Restart the operation with a different tape.",
     /* 0x0e */
-   "C: The operation has failed because the tape in the drive has experienced\n"
+   "C: The operation has failed because the tape in the drive has "
+   "experienced\n"
        "  a mechanical failure:\n"
        "  1. Do not attempt to extract the tape cartridge\n"
        "  2. Call the tape drive supplier helpline.",
     /* 0x0f */
    "W: The memory in the tape cartridge has failed, which reduces\n"
-       "  performance. Do not use the cartridge for further write operations.",
+       "  performance. Do not use the cartridge for further write "
+       "operations.",
     /* 0x10 */
    "C: The operation has failed because the tape cartridge was manually\n"
        "  de-mounted while the tape drive was actively writing or reading.",
     /* 0x11 */
-   "W: You have loaded a cartridge of a type that is read-only in this drive.\n"
+   "W: You have loaded a cartridge of a type that is read-only in this "
+   "drive.\n"
        "  The cartridge will appear as write-protected.",
     /* 0x12 */
    "W: The tape directory on the tape cartridge has been corrupted. File\n"
-       "  search performance will be degraded. The tape directory can be rebuilt\n"
+       "  search performance will be degraded. The tape directory can be "
+       "rebuilt\n"
        "  by reading all the data on the cartridge.",
     /* 0x13 */
    "I: The tape cartridge is nearing the end of its calculated life. It is\n"
@@ -1616,15 +1688,19 @@ static const char * TapeAlertsMessageTable[]= {
        "  data from it.",
     /* 0x14 */
    "C: The tape drive needs cleaning:\n"
-       "  1. If the operation has stopped, eject the tape and clean the drive.\n"
-       "  2. If the operation has not stopped, wait for it to finish and then\n"
+       "  1. If the operation has stopped, eject the tape and clean the "
+       "drive.\n"
+       "  2. If the operation has not stopped, wait for it to finish and "
+       "then\n"
        "  clean the drive.\n"
-       "  Check the tape drive users manual for device specific cleaning instructions.",
+       "  Check the tape drive users manual for device specific cleaning "
+       "instructions.",
     /* 0x15 */
    "W: The tape drive is due for routine cleaning:\n"
        "  1. Wait for the current operation to finish.\n"
        "  2. The use a cleaning cartridge.\n"
-       "  Check the tape drive users manual for device specific cleaning instructions.",
+       "  Check the tape drive users manual for device specific cleaning "
+       "instructions.",
     /* 0x16 */
    "C: The last cleaning cartridge used in the tape drive has worn out:\n"
        "  1. Discard the worn out cleaning cartridge.\n"
@@ -1644,7 +1720,8 @@ static const char * TapeAlertsMessageTable[]= {
    "W: A tape drive cooling fan has failed",
     /* 0x1b */
    "W: A redundant power supply has failed inside the tape drive enclosure.\n"
-       "  Check the enclosure users manual for instructions on replacing the\n"
+       "  Check the enclosure users manual for instructions on replacing "
+       "the\n"
        "  failed power supply.",
     /* 0x1c */
    "W: The tape drive power consumption is outside the specified range.",
@@ -1688,10 +1765,12 @@ static const char * TapeAlertsMessageTable[]= {
        "  drive supplier helpline.",
     /* 0x27 */
    "W: The tape drive may have a hardware fault. Run extended diagnostics to\n"
-       "  verify and diagnose the problem. Check the tape drive users manual for\n"
+       "  verify and diagnose the problem. Check the tape drive users manual "
+       "for\n"
        "  device specific instructions on running extended diagnostic tests.",
     /* 0x28 */
-   "C: The changer mechanism is having difficulty communicating with the tape\n"
+   "C: The changer mechanism is having difficulty communicating with the "
+       "tape\n"
        "  drive:\n"
        "  1. Turn the autoloader off then on.\n"
        "  2. Restart the operation.\n"
@@ -1753,7 +1832,8 @@ static const char * TapeAlertsMessageTable[]= {
         "  and threaded.\n"
         "  1. Remove the cartridge, inspect it as specified in the product\n"
         "  manual, and retry the operation.\n"
-        "  2. If the problem persists, call the tape drive supplier help line.",
+        "  2. If the problem persists, call the tape drive supplier help "
+        "line.",
     /* 0x38 */
     "C: The operation has failed because the medium cannot be unloaded:\n"
         "  1. Do not attempt to extract the tape cartridge.\n"
@@ -1793,19 +1873,23 @@ static const char * ChangerTapeAlertsMessageTable[]= {
     "C: The library has a hardware fault:\n"
         "  1. Reset the library.\n"
         "  2. Restart the operation.\n"
-        "  Check the library users manual for device specific instructions on resetting\n"
+        "  Check the library users manual for device specific instructions on "
+        "resetting\n"
         "  the device.",
     /* 0x04 */
     "C: The library has a hardware fault:\n"
         "  1. Turn the library off then on again.\n"
         "  2. Restart the operation.\n"
         "  3. If the problem persists, call the library supplier help line.\n"
-        "  Check the library users manual for device specific instructions on turning the\n"
+        "  Check the library users manual for device specific instructions on "
+        "turning the\n"
         "  device power on and off.",
     /* 0x05 */
     "W: The library mechanism may have a hardware fault.\n"
-        "  Run extended diagnostics to verify and diagnose the problem. Check the library\n"
-        "  users manual for device specific instructions on running extended diagnostic\n"
+        "  Run extended diagnostics to verify and diagnose the problem. "
+        "Check the library\n"
+        "  users manual for device specific instructions on running extended "
+        "diagnostic\n"
         "  tests.",
     /* 0x06 */
     "C: The library has a problem with the host interface:\n"
@@ -1816,7 +1900,8 @@ static const char * ChangerTapeAlertsMessageTable[]= {
         "  supplier help line.",
     /* 0x08 */
     "W: Preventive maintenance of the library is required.\n"
-        "  Check the library users manual for device specific preventative maintenance\n"
+        "  Check the library users manual for device specific preventative "
+        "maintenance\n"
         "  tasks, or call your library supplier help line.",
     /* 0x09 */
     "C: General environmental conditions inside the library are outside the\n"
@@ -1832,7 +1917,8 @@ static const char * ChangerTapeAlertsMessageTable[]= {
     "C: A cartridge has been left inside the library by a previous hardware\n"
         "  fault:\n"
         "  1. Insert an empty magazine to clear the fault.\n"
-        "  2. If the fault does not clear, turn the library off and then on again.\n"
+        "  2. If the fault does not clear, turn the library off and then on "
+        "again.\n"
         "  3. If the problem persists, call the library supplier help line.",
     /* 0x0d */
     "W: There is a potential problem with the drive ejecting cartridges or\n"
@@ -1863,11 +1949,13 @@ static const char * ChangerTapeAlertsMessageTable[]= {
     "W: Library security has been compromised.",
     /* 0x14 */
     "I: The library security mode has been changed.\n"
-        "  The library has either been put into secure mode, or the library has exited\n"
+        "  The library has either been put into secure mode, or the library "
+        "has exited\n"
         "  the secure mode.\n"
         "  This is for information purposes only. No action is required.",
     /* 0x15 */
-    "I: The library has been manually turned offline and is unavailable for use.",
+    "I: The library has been manually turned offline and is unavailable for "
+    "use.",
     /* 0x16 */
     "I: A drive inside the library has been taken offline.\n"
         "  This is for information purposes only. No action is required.",
@@ -1880,7 +1968,8 @@ static const char * ChangerTapeAlertsMessageTable[]= {
     "C: The library has detected an inconsistency in its inventory.\n"
         "  1. Redo the library inventory to correct inconsistency.\n"
         "  2. Restart the operation.\n"
-        "  Check the applications users manual or the hardware users manual for\n"
+        "  Check the applications users manual or the hardware users manual "
+        "for\n"
         "  specific instructions on redoing the library inventory.",
     /* 0x19 */
     "W: A library operation has been attempted that is invalid at this time.",
@@ -1890,15 +1979,18 @@ static const char * ChangerTapeAlertsMessageTable[]= {
     "W: A library cooling fan has failed.",
     /* 0x1c */
     "W: A redundant power supply has failed inside the library. Check the\n"
-        "  library users manual for instructions on replacing the failed power supply.",
+        "  library users manual for instructions on replacing the failed "
+        "power supply.",
     /* 0x1d */
     "W: The library power consumption is outside the specified range.",
     /* 0x1e */
-    "C: A failure has occurred in the cartridge pass-through mechanism between\n"
+    "C: A failure has occurred in the cartridge pass-through mechanism "
+        "between\n"
         "  two library modules.",
     /* 0x1f */
     "C: A cartridge has been left in the pass-through mechanism from a\n"
-        "  previous hardware fault. Check the library users guide for instructions on\n"
+        "  previous hardware fault. Check the library users guide for "
+        "instructions on\n"
         "  clearing this fault.",
     /* 0x20 */
     "I: The library was unable to read the bar code on a cartridge.",
@@ -1910,7 +2002,8 @@ scsiTapeAlertsChangerDevice(unsigned short code)
     const int num = sizeof(ChangerTapeAlertsMessageTable) /
                         sizeof(ChangerTapeAlertsMessageTable[0]);
 
-    return (code < num) ?  ChangerTapeAlertsMessageTable[code] : "Unknown Alert";
+    return (code < num) ?  ChangerTapeAlertsMessageTable[code] :
+                           "Unknown Alert";
 }
 
 
@@ -2040,7 +2133,7 @@ static const char * strs_for_asc_b[] = {
 static char spare_buff[128];
 
 const char *
-scsiGetIEString(UINT8 asc, UINT8 ascq)
+scsiGetIEString(uint8_t asc, uint8_t ascq)
 {
     const char * rp;
 
@@ -2144,7 +2237,7 @@ scsiFetchExtendedSelfTestTime(scsi_device * device, int * durationSec,
                               int modese_len)
 {
     int err, offset;
-    UINT8 buff[64];
+    uint8_t buff[64];
 
     memset(buff, 0, sizeof(buff));
     if (modese_len <= 6) {
@@ -2169,7 +2262,7 @@ scsiFetchExtendedSelfTestTime(scsi_device * device, int * durationSec,
     if (offset < 0)
         return -EINVAL;
     if (buff[offset + 1] >= 0xa) {
-        int res = (buff[offset + 10] << 8) | buff[offset + 11];
+        int res = sg_get_unaligned_be16(buff + offset + 10);
         *durationSec = res;
         return 0;
     }
@@ -2181,10 +2274,10 @@ void
 scsiDecodeErrCounterPage(unsigned char * resp, struct scsiErrorCounter *ecp)
 {
     memset(ecp, 0, sizeof(*ecp));
-    int num = (resp[2] << 8) | resp[3];
+    int num = sg_get_unaligned_be16(resp + 2);
     unsigned char * ucp = &resp[0] + 4;
     while (num > 3) {
-        int pc = (ucp[0] << 8) | ucp[1];
+        int pc = sg_get_unaligned_be16(ucp + 0);
         int pl = ucp[3] + 4;
         uint64_t * ullp;
         switch (pc) {
@@ -2209,12 +2302,7 @@ scsiDecodeErrCounterPage(unsigned char * resp, struct scsiErrorCounter *ecp)
             xp += (k - sizeof(*ullp));
             k = sizeof(*ullp);
         }
-        *ullp = 0;
-        for (int j = 0; j < k; ++j) {
-            if (j > 0)
-                *ullp <<= 8;
-            *ullp |= xp[j];
-        }
+        *ullp = sg_get_unaligned_be(k, xp);
         num -= pl;
         ucp += pl;
     }
@@ -2225,11 +2313,11 @@ scsiDecodeNonMediumErrPage(unsigned char *resp,
                            struct scsiNonMediumError *nmep)
 {
     memset(nmep, 0, sizeof(*nmep));
-    int num = (resp[2] << 8) | resp[3];
+    int num = sg_get_unaligned_be16(resp + 2);
     unsigned char * ucp = &resp[0] + 4;
     int szof = sizeof(nmep->counterPC0);
     while (num > 3) {
-        int pc = (ucp[0] << 8) | ucp[1];
+        int pc = sg_get_unaligned_be16(ucp + 0);
         int pl = ucp[3] + 4;
         int k;
         unsigned char * xp;
@@ -2242,12 +2330,7 @@ scsiDecodeNonMediumErrPage(unsigned char *resp,
                     xp += (k - szof);
                     k = szof;
                 }
-                nmep->counterPC0 = 0;
-                for (int j = 0; j < k; ++j) {
-                    if (j > 0)
-                        nmep->counterPC0 <<= 8;
-                    nmep->counterPC0 |= xp[j];
-                }
+                nmep->counterPC0 = sg_get_unaligned_be(k, xp + 0);
                 break;
             case 0x8009:
                 nmep->gotTFE_H = 1;
@@ -2257,12 +2340,7 @@ scsiDecodeNonMediumErrPage(unsigned char *resp,
                     xp += (k - szof);
                     k = szof;
                 }
-                nmep->counterTFE_H = 0;
-                for (int j = 0; j < k; ++j) {
-                    if (j > 0)
-                        nmep->counterTFE_H <<= 8;
-                    nmep->counterTFE_H |= xp[j];
-                }
+                nmep->counterTFE_H = sg_get_unaligned_be(k, xp + 0);
                 break;
             case 0x8015:
                 nmep->gotPE_H = 1;
@@ -2272,12 +2350,7 @@ scsiDecodeNonMediumErrPage(unsigned char *resp,
                     xp += (k - szof);
                     k = szof;
                 }
-                nmep->counterPE_H = 0;
-                for (int j = 0; j < k; ++j) {
-                    if (j > 0)
-                        nmep->counterPE_H <<= 8;
-                    nmep->counterPE_H |= xp[j];
-                }
+                nmep->counterPE_H = sg_get_unaligned_be(k, xp + 0);
                 break;
         default:
                 nmep->gotExtraPC = 1;
@@ -2300,7 +2373,7 @@ int
 scsiCountFailedSelfTests(scsi_device * fd, int noisy)
 {
     int num, k, err, fails, fail_hour;
-    UINT8 * ucp;
+    uint8_t * ucp;
     unsigned char resp[LOG_RESP_SELF_TEST_LEN];
 
     if ((err = scsiLogSense(fd, SELFTEST_RESULTS_LPAGE, 0, resp,
@@ -2311,15 +2384,16 @@ scsiCountFailedSelfTests(scsi_device * fd, int noisy)
     }
     if ((resp[0] & 0x3f) != SELFTEST_RESULTS_LPAGE) {
         if (noisy)
-            pout("Self-test Log Sense Failed, page mismatch\n");
+            pout("Self-test %s Failed, page mismatch\n", logSenStr);
         return -1;
     }
     // compute page length
-    num = (resp[2] << 8) + resp[3];
+    num = sg_get_unaligned_be16(resp + 2);
     // Log sense page length 0x190 bytes
     if (num != 0x190) {
         if (noisy)
-            pout("Self-test Log Sense length is 0x%x not 0x190 bytes\n", num);
+            pout("Self-test %s length is 0x%x not 0x190 bytes\n", logSenStr,
+                 num);
         return -1;
     }
     fails = 0;
@@ -2328,7 +2402,7 @@ scsiCountFailedSelfTests(scsi_device * fd, int noisy)
     for (k = 0, ucp = resp + 4; k < 20; ++k, ucp += 20 ) {
 
         // timestamp in power-on hours (or zero if test in progress)
-        int n = (ucp[6] << 8) | ucp[7];
+        int n = sg_get_unaligned_be16(ucp + 6);
 
         // The spec says "all 20 bytes will be zero if no test" but
         // DG has found otherwise.  So this is a heuristic.
@@ -2338,7 +2412,7 @@ scsiCountFailedSelfTests(scsi_device * fd, int noisy)
         if ((res > 2) && (res < 8)) {
             fails++;
             if (1 == fails)
-                fail_hour = (ucp[6] << 8) + ucp[7];
+                fail_hour = sg_get_unaligned_be16(ucp + 6);
         }
     }
     return (fail_hour << 8) + fails;
@@ -2350,7 +2424,7 @@ int
 scsiSelfTestInProgress(scsi_device * fd, int * inProgress)
 {
     int num;
-    UINT8 * ucp;
+    uint8_t * ucp;
     unsigned char resp[LOG_RESP_SELF_TEST_LEN];
 
     if (scsiLogSense(fd, SELFTEST_RESULTS_LPAGE, 0, resp,
@@ -2359,7 +2433,7 @@ scsiSelfTestInProgress(scsi_device * fd, int * inProgress)
     if (resp[0] != SELFTEST_RESULTS_LPAGE)
         return -1;
     // compute page length
-    num = (resp[2] << 8) + resp[3];
+    num = sg_get_unaligned_be16(resp + 2);
     // Log sense page length 0x190 bytes
     if (num != 0x190) {
         return -1;
@@ -2370,7 +2444,7 @@ scsiSelfTestInProgress(scsi_device * fd, int * inProgress)
     return 0;
 }
 
-/* Returns a negative value if failed to fetch Contol mode page or it was
+/* Returns a negative value if failed to fetch Control mode page or it was
    malformed. Returns 0 if GLTSD bit is zero and returns 1 if the GLTSD
    bit is set. Examines default mode page when current==0 else examines
    current mode page. */
@@ -2378,7 +2452,7 @@ int
 scsiFetchControlGLTSD(scsi_device * device, int modese_len, int current)
 {
     int err, offset;
-    UINT8 buff[64];
+    uint8_t buff[64];
     int pc = current ? MPAGE_CONTROL_CURRENT : MPAGE_CONTROL_DEFAULT;
 
     memset(buff, 0, sizeof(buff));
@@ -2414,14 +2488,14 @@ scsiGetRPM(scsi_device * device, int modese_len, int * form_factorp,
            int * haw_zbcp)
 {
     int err, offset;
-    UINT8 buff[64];
+    uint8_t buff[64];
     int pc = MPAGE_CONTROL_DEFAULT;
 
     memset(buff, 0, sizeof(buff));
     if ((0 == scsiInquiryVpd(device, SCSI_VPD_BLOCK_DEVICE_CHARACTERISTICS,
                              buff, sizeof(buff))) &&
-        (((buff[2] << 8) + buff[3]) > 2)) {
-        int speed = (buff[4] << 8) + buff[5];
+        ((sg_get_unaligned_be16(buff + 2)) > 2)) {
+        int speed = sg_get_unaligned_be16(buff + 4);
         if (form_factorp)
             *form_factorp = buff[7] & 0xf;
         if (haw_zbcp)
@@ -2449,7 +2523,7 @@ scsiGetRPM(scsi_device * device, int modese_len, int * form_factorp,
             return -EINVAL;
     }
     offset = scsiModePageOffset(buff, sizeof(buff), modese_len);
-    return (buff[offset + 20] << 8) | buff[offset + 21];
+    return sg_get_unaligned_be16(buff + offset + 20);
 }
 
 /* Returns a non-zero value in case of error, wcep/rcdp == -1 - get value,
@@ -2460,14 +2534,15 @@ scsiGetSetCache(scsi_device * device,  int modese_len, short int * wcep,
                 short int * rcdp)
 {
     int err, offset, resp_len, sp;
-    UINT8 buff[64], ch_buff[64];
+    uint8_t buff[64], ch_buff[64];
     short set_wce = *wcep;
     short set_rcd = *rcdp;
 
     memset(buff, 0, sizeof(buff));
     if (modese_len <= 6) {
-        if ((err = scsiModeSense(device, CACHING_PAGE, 0, MPAGE_CONTROL_CURRENT,
-                                 buff, sizeof(buff)))) {
+        err = scsiModeSense(device, CACHING_PAGE, 0, MPAGE_CONTROL_CURRENT,
+                            buff, sizeof(buff));
+        if (err) {
             if (SIMPLE_ERR_BAD_OPCODE == err)
                 modese_len = 10;
             else {
@@ -2508,14 +2583,14 @@ scsiGetSetCache(scsi_device * device,  int modese_len, short int * wcep,
                               MPAGE_CONTROL_CHANGEABLE,
                               ch_buff, sizeof(ch_buff));
     if (err) {
-        device->set_err(EINVAL, "WCE/RCD bits not changable");
+        device->set_err(EINVAL, "WCE/RCD bits not changeable");
         return err;
     }
 
     // set WCE bit
     if(set_wce >= 0 && *wcep != set_wce) {
        if (0 == (ch_buff[offset + 2] & 0x04)) {
-         device->set_err(EINVAL, "WCE bit not changable");
+         device->set_err(EINVAL, "WCE bit not changeable");
          return 1;
        }
        if(set_wce)
@@ -2526,7 +2601,7 @@ scsiGetSetCache(scsi_device * device,  int modese_len, short int * wcep,
     // set RCD bit
     if(set_rcd >= 0 && *rcdp != set_rcd) {
        if (0 == (ch_buff[offset + 2] & 0x01)) {
-         device->set_err(EINVAL, "RCD bit not changable");
+         device->set_err(EINVAL, "RCD bit not changeable");
          return 1;
        }
        if(set_rcd)
@@ -2537,7 +2612,7 @@ scsiGetSetCache(scsi_device * device,  int modese_len, short int * wcep,
 
     /* mask out DPOFUA device specific (disk) parameter bit */
     if (10 == modese_len) {
-        resp_len = (buff[0] << 8) + buff[1] + 2;
+        resp_len = sg_get_unaligned_be16(buff + 0) + 2;
         buff[3] &= 0xef;
     } else {
         resp_len = buff[0] + 1;
@@ -2562,8 +2637,8 @@ int
 scsiSetControlGLTSD(scsi_device * device, int enabled, int modese_len)
 {
     int err, offset, resp_len, sp;
-    UINT8 buff[64];
-    UINT8 ch_buff[64];
+    uint8_t buff[64];
+    uint8_t ch_buff[64];
 
     memset(buff, 0, sizeof(buff));
     if (modese_len <= 6) {
@@ -2608,8 +2683,8 @@ scsiSetControlGLTSD(scsi_device * device, int enabled, int modese_len)
 
     /* mask out DPOFUA device specific (disk) parameter bit */
     if (10 == modese_len) {
-        resp_len = (buff[0] << 8) + buff[1] + 2;
-        buff[3] &= 0xef;    
+        resp_len = sg_get_unaligned_be16(buff + 0) + 2;
+        buff[3] &= 0xef;
     } else {
         resp_len = buff[0] + 1;
         buff[2] &= 0xef;
@@ -2633,7 +2708,7 @@ int
 scsiFetchTransportProtocol(scsi_device * device, int modese_len)
 {
     int err, offset;
-    UINT8 buff[64];
+    uint8_t buff[64];
 
     memset(buff, 0, sizeof(buff));
     if (modese_len <= 6) {
@@ -2691,7 +2766,7 @@ sg_scsi_sense_desc_find(const unsigned char * sensep, int sense_len,
 
 // Convenience function for formatting strings from SCSI identify
 void
-scsi_format_id_string(char * out, const unsigned char * in, int n)
+scsi_format_id_string(char * out, const uint8_t * in, int n)
 {
   char tmp[65];
   n = n > 64 ? 64 : n;
@@ -2708,7 +2783,7 @@ scsi_format_id_string(char * out, const unsigned char * in, int n)
     }
 
   if (first == -1) {
-    // There are no non-space characters.
+    // There are only space characters.
     out[0] = '\0';
     return;
   }

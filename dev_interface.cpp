@@ -1,25 +1,20 @@
 /*
  * dev_interface.cpp
  *
- * Home page of code is: http://www.smartmontools.org
+ * Home page of code is: https://www.smartmontools.org
  *
- * Copyright (C) 2008-16 Christian Franke <smartmontools-support@lists.sourceforge.net>
+ * Copyright (C) 2008-19 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "config.h"
-#include "int64.h"
+
 #include "dev_interface.h"
+#include "dev_intelliprop.h"
 #include "dev_tunnelled.h"
 #include "atacmds.h" // ATA_SMART_CMD/STATUS
+#include "scsicmds.h" // scsi_cmnd_io
 #include "utility.h"
 
 #include <errno.h>
@@ -202,6 +197,38 @@ bool ata_device::ata_identify_is_cached() const
   return false;
 }
 
+/////////////////////////////////////////////////////////////////////////////
+// scsi_device
+
+bool scsi_device::scsi_pass_through_and_check(scsi_cmnd_io * iop,
+                                              const char * msg)
+{
+  // Provide sense buffer
+  unsigned char sense[32] = {0, };
+  iop->sensep = sense;
+  iop->max_sense_len = sizeof(sense);
+  iop->timeout = SCSI_TIMEOUT_DEFAULT;
+
+  // Run cmd
+  if (!scsi_pass_through(iop)) {
+    if (scsi_debugmode > 0)
+      pout("%sscsi_pass_through() failed, errno=%d [%s]\n",
+           msg, get_errno(), get_errmsg());
+    return false;
+  }
+
+  // Check sense
+  scsi_sense_disect sinfo;
+  scsi_do_sense_disect(iop, &sinfo);
+  int err = scsiSimpleSenseFilter(&sinfo);
+  if (err) {
+    if (scsi_debugmode > 0)
+      pout("%sscsi error: %s\n", msg, scsiErrString(err));
+    return set_err(EIO, "scsi error %s", scsiErrString(err));
+  }
+
+  return true;
+}
 
 /////////////////////////////////////////////////////////////////////////////
 // nvme_device
@@ -281,8 +308,9 @@ std::string smart_interface::get_valid_dev_types_str()
 {
   // default
   std::string s =
-    "ata, scsi, nvme[,NSID], sat[,auto][,N][+TYPE], "
-    "usbcypress[,X], usbjmicron[,p][,x][,N], usbprolific, usbsunplus";
+    "ata, scsi[+TYPE], nvme[,NSID], sat[,auto][,N][+TYPE], usbcypress[,X], "
+    "usbjmicron[,p][,x][,N], usbprolific, usbsunplus, sntjmicron[,NSID], "
+    "intelliprop,N[+TYPE], jmb39x,N[,sLBA][,force][+TYPE]";
   // append custom
   std::string s2 = get_valid_custom_dev_types_str();
   if (!s2.empty()) {
@@ -399,8 +427,9 @@ smart_device * smart_interface::get_smart_device(const char * name, const char *
     dev = get_nvme_device(name, type, nsid);
   }
 
-  else if (  ((!strncmp(type, "sat", 3) && (!type[3] || strchr(",+", type[3])))
-           || (!strncmp(type, "usb", 3)))) {
+  else if (  (str_starts_with(type, "sat") && (!type[3] || strchr(",+", type[3])))
+           || str_starts_with(type, "scsi+")
+           || str_starts_with(type, "usb")                                        ) {
     // Split "sat...+base..." -> ("sat...", "base...")
     unsigned satlen = strcspn(type, "+");
     std::string sattype(type, satlen);
@@ -422,6 +451,58 @@ smart_device * smart_interface::get_smart_device(const char * name, const char *
     return get_sat_device(sattype.c_str(), basedev.release()->to_scsi());
   }
 
+  else if (str_starts_with(type, "snt")) {
+    smart_device_auto_ptr basedev( get_smart_device(name, "scsi") );
+    if (!basedev) {
+      set_err(EINVAL, "Type '%s': %s", type, get_errmsg());
+      return 0;
+    }
+
+    return get_snt_device(type, basedev.release()->to_scsi());
+  }
+
+  else if (str_starts_with(type, "jmb39x")) {
+    // Split "jmb39x...+base..." -> ("jmb39x...", "base...")
+    unsigned jmblen = strcspn(type, "+");
+    std::string jmbtype(type, jmblen);
+    const char * basetype = (type[jmblen] ? type+jmblen+1 : "");
+    // Recurse to allocate base device, default is standard SCSI
+    if (!*basetype)
+      basetype = "scsi";
+    smart_device_auto_ptr basedev( get_smart_device(name, basetype) );
+    if (!basedev) {
+      set_err(EINVAL, "Type '%s+...': %s", jmbtype.c_str(), get_errmsg());
+      return 0;
+    }
+    // Attach JMB39x tunnel
+    return get_jmb39x_device(jmbtype.c_str(), basedev.release());
+  }
+
+  else if (str_starts_with(type, "intelliprop")) {
+    // Parse "intelliprop,N[+base...]"
+    unsigned phydrive = ~0; int n = -1; char c = 0;
+    sscanf(type, "intelliprop,%u%n%c", &phydrive, &n, &c);
+    if (!((n == (int)strlen(type) || c == '+') && phydrive <= 3)) {
+      set_err(EINVAL, "Option '-d intelliprop,N' requires N between 0 and 3");
+      return 0;
+    }
+    const char * basetype = (type[n] ? type + n + 1 : "");
+    // Recurse to allocate base device, default is standard ATA
+    if (!*basetype)
+      basetype = "ata";
+    smart_device_auto_ptr basedev( get_smart_device(name, basetype) );
+    if (!basedev) {
+      set_err(EINVAL, "Type '%s': %s", type, get_errmsg());
+      return 0;
+    }
+    // Result must be ATA
+    if (!basedev->is_ata()) {
+      set_err(EINVAL, "Type '%s': Device type '%s' is not ATA", type, basetype);
+      return 0;
+    }
+    return get_intelliprop_device(this, phydrive, basedev.release()->to_ata());
+  }
+
   else {
     set_err(EINVAL, "Unknown device type '%s'", type);
     return 0;
@@ -429,6 +510,12 @@ smart_device * smart_interface::get_smart_device(const char * name, const char *
   if (!dev && !get_errno())
     set_err(EINVAL, "Not a device of type '%s'", type);
   return dev;
+}
+
+bool smart_interface::scan_smart_devices(smart_device_list & /*devlist*/,
+  const char * /*type*/, const char * /*pattern*/ /* = 0 */)
+{
+  return set_err(ENOSYS);
 }
 
 bool smart_interface::scan_smart_devices(smart_device_list & devlist,
@@ -464,4 +551,13 @@ smart_device * smart_interface::get_custom_smart_device(const char * /*name*/, c
 std::string smart_interface::get_valid_custom_dev_types_str()
 {
   return "";
+}
+
+smart_device * smart_interface::get_scsi_passthrough_device(const char * type, scsi_device * scsidev)
+{
+  if (!strncmp(type, "snt", 3)) {
+    return get_snt_device(type, scsidev);
+  }
+
+  return get_sat_device(type, scsidev);
 }

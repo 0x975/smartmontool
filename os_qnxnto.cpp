@@ -1,11 +1,18 @@
-
+/*
+ * os_qnxnto.cpp
+ *
+ * Home page of code is: http://www.smartmontools.org
+ *
+ * Copyright (C) 2007 Joerg Hering
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 
 // This is needed for the various HAVE_* macros and PROJECT_* macros.
 #include "config.h"
 
 // These are needed to define prototypes and structures for the
 // functions defined below
-#include "int64.h"
 #include "atacmds.h"
 #include "scsicmds.h"
 #include "utility.h"
@@ -20,65 +27,24 @@
 // appearing with #include "*.h" above.  Please list these (below) in
 // alphabetic/dictionary order.
 const char *os_XXXX_c_cvsid="$Id$" \
-ATACMDS_H_CVSID CONFIG_H_CVSID INT64_H_CVSID OS_QNXNTO_H_CVSID SCSICMDS_H_CVSID UTILITY_H_CVSID;
+ATACMDS_H_CVSID CONFIG_H_CVSID OS_QNXNTO_H_CVSID SCSICMDS_H_CVSID UTILITY_H_CVSID;
 
 
 // This is here to prevent compiler warnings for unused arguments of
 // functions.
 #define ARGUSED(x) ((void)(x))
 
-// Please eliminate the following block: both the #include and
-// the 'unsupported()' function.  They are only here to warn
-// unsuspecting users that their Operating System is not supported! If
-// you wish, you can use a similar warning mechanism for any of the
-// functions in this file that you can not (or choose not to)
-// implement.
-
-
-#ifdef HAVE_UNAME
-#include <sys/utsname.h>
-#endif
 //----------------------------------------------------------------------------------------------
 // private Functions
 static int ata_sense_data(void *sdata,int *error,int *key,int *asc,int *ascq);
 static int ata_interpret_sense(struct cam_pass_thru *cpt,void *sense,int *status,int rcount);
 static int ata_pass_thru(int fd,struct cam_pass_thru *pcpt);
-//----------------------------------------------------------------------------------------------
-static void unsupported(){
-  static int warninggiven;
-
-  if (!warninggiven) {
-    char *osname;
-
-#ifdef HAVE_UNAME
-    struct utsname ostype;
-    uname(&ostype);
-    osname=ostype.sysname;
-#else
-    osname="host's";
-#endif
-
-    pout("\n"
-         "############################################################################\n"
-         "WARNING: smartmontools has not been ported to the %s Operating System.\n"
-         "Please see the files os_generic.cpp and os_generic.h for porting instructions.\n"
-         "############################################################################\n\n",
-         osname);
-    warninggiven=1;
-  }
-
-  return;
-}
-// End of the 'unsupported()' block that you should eliminate.
-
 
 // print examples for smartctl.  You should modify this function so
 // that the device paths are sensible for your OS, and to eliminate
 // unsupported commands (eg, 3ware controllers).
 void print_smartctl_examples(){
-  printf("=================================================== SMARTCTL EXAMPLES =====\n\n");
-#ifdef HAVE_GETOPT_LONG
-  printf(
+  printf("=================================================== SMARTCTL EXAMPLES =====\n\n"
          "  smartctl -a /dev/hd0                       (Prints all SMART information)\n\n"
          "  smartctl --smart=on --offlineauto=on --saveauto=on /dev/hd0\n"
          "                                              (Enables SMART on first disk)\n\n"
@@ -88,17 +54,6 @@ void print_smartctl_examples(){
          "  smartctl -a --device=3ware,2 /dev/sda\n"
          "          (Prints all SMART info for 3rd ATA disk on 3ware RAID controller)\n"
          );
-#else
-  printf(
-         "  smartctl -a /dev/hd0                       (Prints all SMART information)\n"
-         "  smartctl -s on -o on -S on /dev/hd0         (Enables SMART on first disk)\n"
-         "  smartctl -t long /dev/hd0              (Executes extended disk self-test)\n"
-         "  smartctl -A -l selftest -q errorsonly /dev/hd0\n"
-         "                                      (Prints Self-Test & Attribute errors)\n"
-         "  smartctl -a -d 3ware,2 /dev/sda\n"
-         "          (Prints all SMART info for 3rd ATA disk on 3ware RAID controller)\n"
-         );
-#endif
   return;
 }
 
@@ -134,7 +89,6 @@ int len,dev_prefix_len;
 int make_device_names (char*** devlist, const char* name) {
   ARGUSED(devlist);
   ARGUSED(name);
-  unsupported();
   return 0;
 }
 
@@ -159,7 +113,7 @@ int deviceclose(int fd)
   return(close(fd));
 }
 //----------------------------------------------------------------------------------------------
-// Interface to ATA devices.  See os_linux.cpp for the cannonical example.
+// Interface to ATA devices.  See os_linux.cpp for the canonical example.
 // DETAILED DESCRIPTION OF ARGUMENTS
 //   device: is the integer handle provided by deviceopen()
 //   command: defines the different operations, see atacmds.h
@@ -377,7 +331,6 @@ int do_scsi_cmnd_io(int fd,struct scsi_cmnd_io * iop,int report)
   ARGUSED(fd);
   ARGUSED(iop);
   ARGUSED(report);
-  unsupported();
   return -ENOSYS;
 }
 //----------------------------------------------------------------------------------------------

@@ -1,25 +1,13 @@
 /*
  * utility.cpp
  *
- * Home page of code is: http://www.smartmontools.org
+ * Home page of code is: https://www.smartmontools.org
  *
  * Copyright (C) 2002-12 Bruce Allen
- * Copyright (C) 2008-16 Christian Franke
+ * Copyright (C) 2008-19 Christian Franke
  * Copyright (C) 2000 Michael Cornwell <cornwell@acm.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
- * This code was originally developed as a Senior Thesis by Michael Cornwell
- * at the Concurrent Systems Laboratory (now part of the Storage Systems
- * Research Center), Jack Baskin School of Engineering, University of
- * California, Santa Cruz. http://ssrc.soe.ucsc.edu/
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 // THIS FILE IS INTENDED FOR UTILITY ROUTINES THAT ARE APPLICABLE TO
@@ -27,7 +15,9 @@
 // SMARTCTL, OR BOTH.
 
 #include "config.h"
+#define __STDC_FORMAT_MACROS 1 // enable PRI* for C++
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -46,14 +36,14 @@
 #include <stdexcept>
 
 #include "svnversion.h"
-#include "int64.h"
 #include "utility.h"
 
 #include "atacmds.h"
 #include "dev_interface.h"
+#include "sg_unaligned.h"
 
 const char * utility_cpp_cvsid = "$Id$"
-                                 UTILITY_H_CVSID INT64_H_CVSID;
+  UTILITY_H_CVSID;
 
 const char * packet_types[] = {
         "Direct-access (disk)",
@@ -90,7 +80,7 @@ std::string format_version_info(const char * prog_name, bool full /*= false*/)
       "(build date " __DATE__ ")" // checkout without expansion of Id keywords
 #endif
       " [%s] " BUILD_INFO "\n"
-    "Copyright (C) 2002-16, Bruce Allen, Christian Franke, www.smartmontools.org\n",
+    "Copyright (C) 2002-19, Bruce Allen, Christian Franke, www.smartmontools.org\n",
     prog_name, smi()->get_os_version_str().c_str()
   );
   if (!full)
@@ -114,15 +104,31 @@ std::string format_version_info(const char * prog_name, bool full /*= false*/)
 #endif
     "smartmontools build host: " SMARTMONTOOLS_BUILD_HOST "\n"
     "smartmontools build with: "
-#if   __cplusplus > 201402
+
+#define N2S_(s) #s
+#define N2S(s) "(" N2S_(s) ")"
+#if   __cplusplus >  201703
+                               "C++2x" N2S(__cplusplus)
+#elif __cplusplus == 201703
                                "C++17"
-#elif __cplusplus > 201103
+#elif __cplusplus >  201402
+                               "C++14" N2S(__cplusplus)
+#elif __cplusplus == 201402
                                "C++14"
-#elif __cplusplus > 199711
+#elif __cplusplus >  201103
+                               "C++11" N2S(__cplusplus)
+#elif __cplusplus == 201103
                                "C++11"
-#else
+#elif __cplusplus >  199711
+                               "C++98" N2S(__cplusplus)
+#elif __cplusplus == 199711
                                "C++98"
+#else
+                               "C++"   N2S(__cplusplus)
 #endif
+#undef N2S
+#undef N2S_
+
 #if defined(__GNUC__) && defined(__VERSION__) // works also with CLang
                                      ", GCC " __VERSION__
 #endif
@@ -163,7 +169,7 @@ static char *ReadSiteDefaultTimezone(){
 #endif
 
 // Make sure that this executable is aware if the user has changed the
-// time-zone since the last time we polled devices. The cannonical
+// time-zone since the last time we polled devices. The canonical
 // example is a user who starts smartd on a laptop, then flies across
 // time-zones with a laptop, and then changes the timezone, WITHOUT
 // restarting smartd. This is a work-around for a bug in
@@ -272,47 +278,49 @@ const char *packetdevicetype(int type){
   return "Unknown";
 }
 
-// Runtime check of byte ordering, throws if different from isbigendian().
-static void check_endianness()
+// Convert time to broken-down local time, throw on error.
+struct tm * time_to_tm_local(struct tm * tp, time_t t)
 {
-  union {
-    // Force compile error if int type is not 32bit.
-    unsigned char c[sizeof(unsigned) == 4 ? 4 : -1];
-    unsigned i;
-  } x = {{1,2,3,4}};
-
-  int big = -1;
-  switch (x.i) {
-    case 0x01020304: big = 1; break;
-    case 0x04030201: big = 0; break;
-  }
-
-  if (big != (isbigendian() ? 1 : 0))
-    throw std::logic_error("CPU endianness does not match compile time test");
+#ifndef _WIN32
+  // POSIX (missing in MSVRCT, C and C++)
+  if (!localtime_r(&t, tp))
+    throw std::runtime_error("localtime_r() failed");
+#else
+  // MSVCRT (missing in POSIX, C11 variant differs)
+  if (localtime_s(tp, &t))
+    throw std::runtime_error("localtime_s() failed");
+#endif
+  return tp;
 }
 
 // Utility function prints date and time and timezone into a character
-// buffer of length>=64.  All the fuss is needed to get the right
+// buffer of length 64.  All the fuss is needed to get the right
 // timezone info (sigh).
-void dateandtimezoneepoch(char *buffer, time_t tval){
-  struct tm *tmval;
-  const char *timezonename;
-  char datebuffer[DATEANDEPOCHLEN];
-  int lenm1;
-
+void dateandtimezoneepoch(char (& buffer)[DATEANDEPOCHLEN], time_t tval)
+{
   FixGlibcTimeZoneBug();
   
   // Get the time structure.  We need this to determine if we are in
   // daylight savings time or not.
-  tmval=localtime(&tval);
+  struct tm tmbuf, * tmval = time_to_tm_local(&tmbuf, tval);
   
-  // Convert to an ASCII string, put in datebuffer
-  // same as: asctime_r(tmval, datebuffer);
-  strncpy(datebuffer, asctime(tmval), DATEANDEPOCHLEN);
-  datebuffer[DATEANDEPOCHLEN-1]='\0';
+  // Convert to an ASCII string, put in datebuffer.
+  // Same as: strftime(datebuffer, sizeof(datebuffer), "%a %b %e %H:%M:%S %Y\n"),
+  // but always in "C" locale.
+  char datebuffer[32];
+  STATIC_ASSERT(sizeof(datebuffer) >= 26); // assumed by asctime_r()
+#ifndef _WIN32
+  // POSIX (missing in MSVRCT, C and C++)
+  if (!asctime_r(tmval, datebuffer))
+    throw std::runtime_error("asctime_r() failed");
+#else
+  // MSVCRT, C11 (missing in POSIX)
+  if (asctime_s(datebuffer, sizeof(datebuffer), tmval))
+    throw std::runtime_error("asctime_s() failed");
+#endif
   
   // Remove newline
-  lenm1=strlen(datebuffer)-1;
+  int lenm1 = strlen(datebuffer) - 1;
   datebuffer[lenm1>=0?lenm1:0]='\0';
 
 #if defined(_WIN32) && defined(_MSC_VER)
@@ -321,6 +329,7 @@ void dateandtimezoneepoch(char *buffer, time_t tval){
 #endif
 
   // correct timezone name
+  const char * timezonename;
   if (tmval->tm_isdst==0)
     // standard time zone
     timezonename=tzname[0];
@@ -342,16 +351,6 @@ void dateandtimezoneepoch(char *buffer, time_t tval){
   // Finally put the information into the buffer as needed.
   snprintf(buffer, DATEANDEPOCHLEN, "%s %s", datebuffer, timezonename);
   
-  return;
-}
-
-// Date and timezone gets printed into string pointed to by buffer
-void dateandtimezone(char *buffer){
-  
-  // Get the epoch (time in seconds since Jan 1 1970)
-  time_t tval=time(NULL);
-  
-  dateandtimezoneepoch(buffer, tval);
   return;
 }
 
@@ -434,22 +433,13 @@ static const char * check_regex(const char * pattern)
   return (const char *)0;
 }
 
-// Wrapper class for regex(3)
+// Wrapper class for POSIX regex(3) or std::regex
+
+#ifndef WITH_CXX11_REGEX
 
 regular_expression::regular_expression()
-: m_flags(0)
 {
   memset(&m_regex_buf, 0, sizeof(m_regex_buf));
-}
-
-regular_expression::regular_expression(const char * pattern, int flags,
-                                       bool throw_on_error /*= true*/)
-{
-  memset(&m_regex_buf, 0, sizeof(m_regex_buf));
-  if (!compile(pattern, flags) && throw_on_error)
-    throw std::runtime_error(strprintf(
-      "error in regular expression \"%s\": %s",
-      m_pattern.c_str(), m_errmsg.c_str()));
 }
 
 regular_expression::~regular_expression()
@@ -458,15 +448,19 @@ regular_expression::~regular_expression()
 }
 
 regular_expression::regular_expression(const regular_expression & x)
+: m_pattern(x.m_pattern),
+  m_errmsg(x.m_errmsg)
 {
   memset(&m_regex_buf, 0, sizeof(m_regex_buf));
-  copy(x);
+  copy_buf(x);
 }
 
 regular_expression & regular_expression::operator=(const regular_expression & x)
 {
+  m_pattern = x.m_pattern;
+  m_errmsg = x.m_errmsg;
   free_buf();
-  copy(x);
+  copy_buf(x);
   return *this;
 }
 
@@ -478,13 +472,9 @@ void regular_expression::free_buf()
   }
 }
 
-void regular_expression::copy(const regular_expression & x)
+void regular_expression::copy_buf(const regular_expression & x)
 {
-  m_pattern = x.m_pattern;
-  m_flags = x.m_flags;
-  m_errmsg = x.m_errmsg;
-
-  if (!m_pattern.empty() && m_errmsg.empty()) {
+  if (nonempty(&x.m_regex_buf, sizeof(x.m_regex_buf))) {
     // There is no POSIX compiled-regex-copy command.
     if (!compile())
       throw std::runtime_error(strprintf(
@@ -493,17 +483,39 @@ void regular_expression::copy(const regular_expression & x)
   }
 }
 
-bool regular_expression::compile(const char * pattern, int flags)
+#endif // !WITH_CXX11_REGEX
+
+regular_expression::regular_expression(const char * pattern)
+: m_pattern(pattern)
 {
+  if (!compile())
+    throw std::runtime_error(strprintf(
+      "error in regular expression \"%s\": %s",
+      m_pattern.c_str(), m_errmsg.c_str()));
+}
+
+bool regular_expression::compile(const char * pattern)
+{
+#ifndef WITH_CXX11_REGEX
   free_buf();
+#endif
   m_pattern = pattern;
-  m_flags = flags;
   return compile();
 }
 
 bool regular_expression::compile()
 {
-  int errcode = regcomp(&m_regex_buf, m_pattern.c_str(), m_flags);
+#ifdef WITH_CXX11_REGEX
+  try {
+    m_regex.assign(m_pattern, std::regex_constants::extended);
+  }
+  catch (std::regex_error & ex) {
+    m_errmsg = ex.what();
+    return false;
+  }
+
+#else
+  int errcode = regcomp(&m_regex_buf, m_pattern.c_str(), REG_EXTENDED);
   if (errcode) {
     char errmsg[512];
     regerror(errcode, &m_regex_buf, errmsg, sizeof(errmsg));
@@ -511,11 +523,16 @@ bool regular_expression::compile()
     free_buf();
     return false;
   }
+#endif
 
   const char * errmsg = check_regex(m_pattern.c_str());
   if (errmsg) {
     m_errmsg = errmsg;
+#ifdef WITH_CXX11_REGEX
+    m_regex = std::regex();
+#else
     free_buf();
+#endif
     return false;
   }
 
@@ -523,56 +540,38 @@ bool regular_expression::compile()
   return true;
 }
 
-#ifndef HAVE_STRTOULL
-// Replacement for missing strtoull() (Linux with libc < 6, MSVC)
-// Functionality reduced to requirements of smartd and split_selective_arg().
-
-uint64_t strtoull(const char * p, char * * endp, int base)
+bool regular_expression::full_match(const char * str) const
 {
-  uint64_t result, maxres;
-  int i = 0;
-  char c = p[i++];
-
-  if (!base) {
-    if (c == '0') {
-      if (p[i] == 'x' || p[i] == 'X') {
-        base = 16; i++;
-      }
-      else
-        base = 8;
-      c = p[i++];
-    }
-    else
-      base = 10;
-  }
-
-  result = 0;
-  maxres = ~(uint64_t)0 / (unsigned)base;
-  for (;;) {
-    unsigned digit;
-    if ('0' <= c && c <= '9')
-      digit = c - '0';
-    else if ('A' <= c && c <= 'Z')
-      digit = c - 'A' + 10;
-    else if ('a' <= c && c <= 'z')
-      digit = c - 'a' + 10;
-    else
-      break;
-    if (digit >= (unsigned)base)
-      break;
-    if (!(   result < maxres
-          || (result == maxres && digit <= ~(uint64_t)0 % (unsigned)base))) {
-      result = ~(uint64_t)0; errno = ERANGE; // return on overflow
-      break;
-    }
-    result = result * (unsigned)base + digit;
-    c = p[i++];
-  }
-  if (endp)
-    *endp = (char *)p + i - 1;
-  return result;
+#ifdef WITH_CXX11_REGEX
+  return std::regex_match(str, m_regex);
+#else
+  match_range range;
+  return (   !regexec(&m_regex_buf, str, 1, &range, 0)
+          && range.rm_so == 0 && range.rm_eo == (int)strlen(str));
+#endif
 }
-#endif // HAVE_STRTOLL
+
+bool regular_expression::execute(const char * str, unsigned nmatch, match_range * pmatch) const
+{
+#ifdef WITH_CXX11_REGEX
+  std::cmatch m;
+  if (!std::regex_search(str, m, m_regex))
+    return false;
+  unsigned sz = m.size();
+  for (unsigned i = 0; i < nmatch; i++) {
+    if (i < sz && *m[i].first) {
+      pmatch[i].rm_so = m[i].first  - str;
+      pmatch[i].rm_eo = m[i].second - str;
+    }
+    else
+      pmatch[i].rm_so = pmatch[i].rm_eo = -1;
+  }
+  return true;
+
+#else
+  return !regexec(&m_regex_buf, str, nmatch, pmatch, 0);
+#endif
+}
 
 // Splits an argument to the -t option that is assumed to be of the form
 // "selective,%lld-%lld" (prefixes of "0" (for octal) and "0x"/"0X" (for hex)
@@ -738,7 +737,7 @@ const char * format_capacity(char * str, int strsize, uint64_t val,
 }
 
 // return (v)sprintf() formatted std::string
-
+__attribute_format_printf(1, 0)
 std::string vstrprintf(const char * fmt, va_list ap)
 {
   char buf[512];
@@ -755,6 +754,83 @@ std::string strprintf(const char * fmt, ...)
   return str;
 }
 
+#if defined(HAVE___INT128)
+// Compiler supports '__int128'.
+
+// Recursive 128-bit to string conversion function
+static int snprint_uint128(char * str, int strsize, unsigned __int128 value)
+{
+  if (strsize <= 0)
+    return -1;
+
+  if (value <= 0xffffffffffffffffULL) {
+    // Print leading digits as 64-bit value
+    return snprintf(str, (size_t)strsize, "%" PRIu64, (uint64_t)value);
+  }
+  else {
+    // Recurse to print leading digits
+    const uint64_t e19 = 10000000000000000000ULL; // 2^63 < 10^19 < 2^64
+    int len1 = snprint_uint128(str, strsize, value / e19);
+    if (len1 < 0)
+      return -1;
+
+    // Print 19 digits remainder as 64-bit value
+    int len2 = snprintf(str + (len1 < strsize ? len1 : strsize - 1),
+                        (size_t)(len1 < strsize ? strsize - len1 : 1),
+                        "%019" PRIu64, (uint64_t)(value % e19)        );
+    if (len2 < 0)
+      return -1;
+    return len1 + len2;
+  }
+}
+
+// Convert 128-bit unsigned integer provided as two 64-bit halves to a string.
+const char * uint128_hilo_to_str(char * str, int strsize, uint64_t value_hi, uint64_t value_lo)
+{
+  snprint_uint128(str, strsize, ((unsigned __int128)value_hi << 64) | value_lo);
+  return str;
+}
+
+#elif defined(HAVE_LONG_DOUBLE_WIDER_PRINTF)
+// Compiler and *printf() support 'long double' which is wider than 'double'.
+
+const char * uint128_hilo_to_str(char * str, int strsize, uint64_t value_hi, uint64_t value_lo)
+{
+  snprintf(str, strsize, "%.0Lf", value_hi * (0xffffffffffffffffULL + 1.0L) + value_lo);
+  return str;
+}
+
+#else // !HAVE_LONG_DOUBLE_WIDER_PRINTF
+// No '__int128' or 'long double' support, use 'double'.
+
+const char * uint128_hilo_to_str(char * str, int strsize, uint64_t value_hi, uint64_t value_lo)
+{
+  snprintf(str, strsize, "%.0f", value_hi * (0xffffffffffffffffULL + 1.0) + value_lo);
+  return str;
+}
+
+#endif // HAVE___INT128
+
+// Runtime check of byte ordering, throws on error.
+static void check_endianness()
+{
+  const union {
+    // Force compile error if int type is not 32bit.
+    unsigned char c[sizeof(int) == 4 ? 8 : -1];
+    uint64_t i;
+  } x = {{1, 2, 3, 4, 5, 6, 7, 8}};
+  const uint64_t le = 0x0807060504030201ULL;
+  const uint64_t be = 0x0102030405060708ULL;
+
+  if (!(   x.i == (isbigendian() ? be : le)
+        && sg_get_unaligned_le16(x.c)   == (uint16_t)le
+        && sg_get_unaligned_be16(x.c+6) == (uint16_t)be
+        && sg_get_unaligned_le32(x.c)   == (uint32_t)le
+        && sg_get_unaligned_be32(x.c+4) == (uint32_t)be
+        && sg_get_unaligned_le64(x.c)   == le
+        && sg_get_unaligned_be64(x.c)   == be          ))
+    throw std::logic_error("CPU endianness does not match compile time test");
+}
 
 #ifndef HAVE_WORKING_SNPRINTF
 // Some versions of (v)snprintf() don't append null char (MSVCRT.DLL),
@@ -787,7 +863,14 @@ int safe_snprintf(char *buf, int size, const char *fmt, ...)
   return i;
 }
 
-#else // HAVE_WORKING_SNPRINTF
+static void check_snprintf() {}
+
+#elif defined(__GNUC__) && (__GNUC__ >= 7)
+
+// G++ 7+: Assume sane implementation and avoid -Wformat-truncation warning
+static void check_snprintf() {}
+
+#else
 
 static void check_snprintf()
 {
@@ -795,8 +878,7 @@ static void check_snprintf()
   int n1 = snprintf(buf, 8, "123456789");
   int n2 = snprintf(buf, 0, "X");
   if (!(!strcmp(buf, "1234567") && n1 == 9 && n2 == 1))
-    throw std::logic_error("Function snprintf() does not conform to C99,\n"
-                           "please contact " PACKAGE_BUGREPORT);
+    throw std::logic_error("Function snprintf() does not conform to C99");
 }
 
 #endif // HAVE_WORKING_SNPRINTF
@@ -805,7 +887,5 @@ static void check_snprintf()
 void check_config()
 {
   check_endianness();
-#ifdef HAVE_WORKING_SNPRINTF
   check_snprintf();
-#endif
 }

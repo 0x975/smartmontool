@@ -5,16 +5,11 @@
  *
  * Copyright (C) 2003-10 Eduard Martinescu
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <sys/param.h>
+#include <sys/endian.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -37,7 +32,7 @@
 #include <sys/utsname.h>
 
 #include "config.h"
-#include "int64.h"
+
 // set by /usr/include/sys/ata.h, suppress warning
 #undef ATA_READ_LOG_EXT
 #include "atacmds.h"
@@ -81,7 +76,7 @@
 #endif
 
 const char *os_XXXX_c_cvsid="$Id$" \
-ATACMDS_H_CVSID CCISS_H_CVSID CONFIG_H_CVSID INT64_H_CVSID OS_FREEBSD_H_CVSID SCSICMDS_H_CVSID UTILITY_H_CVSID;
+ATACMDS_H_CVSID CCISS_H_CVSID CONFIG_H_CVSID OS_FREEBSD_H_CVSID SCSICMDS_H_CVSID UTILITY_H_CVSID;
 
 #define NO_RETURN 0
 #define BAD_SMART 1
@@ -322,38 +317,6 @@ bool freebsd_ata_device::ata_pass_through(const ata_cmd_in & in, ata_cmd_out & o
   out.out_regs.sector_count_16 = request.u.ata.count;
   out.out_regs.lba_48 = request.u.ata.lba;
 
-
-  // Command specific processing
-  if (in.in_regs.command == ATA_SMART_CMD
-       && in.in_regs.features == ATA_SMART_STATUS
-       && in.out_needed.lba_high)
-  {
-    unsigned const char normal_lo=0x4f, normal_hi=0xc2;
-    unsigned const char failed_lo=0xf4, failed_hi=0x2c;
-
-    // Cyl low and Cyl high unchanged means "Good SMART status"
-    if (!(out.out_regs.lba_mid==normal_lo && out.out_regs.lba_high==normal_hi)
-    // These values mean "Bad SMART status"
-        && !(out.out_regs.lba_mid==failed_lo && out.out_regs.lba_high==failed_hi))
-
-    {
-      // We haven't gotten output that makes sense; print out some debugging info
-      char buf[512];
-      snprintf(buf, sizeof(buf),
-        "CMD=0x%02x\nFR =0x%02x\nNS =0x%02x\nSC =0x%02x\nCL =0x%02x\nCH =0x%02x\nRETURN =0x%04x\n",
-        (int)request.u.ata.command,
-        (int)request.u.ata.feature,
-        (int)request.u.ata.count,
-        (int)((request.u.ata.lba) & 0xff),
-        (int)((request.u.ata.lba>>8) & 0xff),
-        (int)((request.u.ata.lba>>16) & 0xff),
-        (int)request.error);
-      printwarning(BAD_SMART,buf);
-      out.out_regs.lba_high = failed_hi; 
-      out.out_regs.lba_mid = failed_lo;
-    }
-  }
-
   return true;
 }
 
@@ -397,15 +360,16 @@ int freebsd_atacam_device::do_cmd( struct ata_ioc_request* request, bool is_48bi
   union ccb ccb;
   int camflags;
 
-  // FIXME:
   // 48bit commands are broken in ATACAM before r242422/HEAD
   // and may cause system hang
-  // Waiting for MFC to make sure that bug is fixed,
-  // later version check needs to be added
+  // First version with working support should be FreeBSD 9.2.0/RELEASE
+
+#if (FREEBSDVER < 902001)
   if(!strcmp("ata",m_camdev->sim_name) && is_48bit_cmd) {
     set_err(ENOSYS, "48-bit ATA commands not implemented for legacy controllers");
     return -1;
   }
+#endif
 
   memset(&ccb, 0, sizeof(ccb));
 
@@ -515,7 +479,7 @@ bool freebsd_nvme_device::open()
   	}
   	nsid = 0xFFFFFFFF; // broadcast id
   }
-  else if (sscanf(dev, NVME_CTRLR_PREFIX"%d"NVME_NS_PREFIX"%d%c", 
+  else if (sscanf(dev, NVME_CTRLR_PREFIX"%d" NVME_NS_PREFIX "%d%c", 
   	&ctrlid, &nsid, &tmp) == 2) 
   {
   	if(ctrlid < 0 || nsid < 0) {
@@ -550,29 +514,39 @@ bool freebsd_nvme_device::nvme_pass_through(const nvme_cmd_in & in, nvme_cmd_out
 {
   // nvme_passthru_cmd pt;
   struct nvme_pt_command pt;
+  struct nvme_completion *cp_p;
   memset(&pt, 0, sizeof(pt));
 
+#if __FreeBSD_version >= 1200058 && __FreeBSD_version < 1200081
+  pt.cmd.opc_fuse = NVME_CMD_SET_OPC(in.opcode);
+#else
   pt.cmd.opc = in.opcode;
-  pt.cmd.nsid = in.nsid;
+#endif
+  pt.cmd.opc = in.opcode;
+  pt.cmd.nsid = htole32(in.nsid);
   pt.buf = in.buffer;
   pt.len = in.size;
-  pt.cmd.cdw10 = in.cdw10;
-  pt.cmd.cdw11 = in.cdw11;
-  pt.cmd.cdw12 = in.cdw12;
-  pt.cmd.cdw13 = in.cdw13;
-  pt.cmd.cdw14 = in.cdw14;
-  pt.cmd.cdw15 = in.cdw15;
+  pt.cmd.cdw10 = htole32(in.cdw10);
+  pt.cmd.cdw11 = htole32(in.cdw11);
+  pt.cmd.cdw12 = htole32(in.cdw12);
+  pt.cmd.cdw13 = htole32(in.cdw13);
+  pt.cmd.cdw14 = htole32(in.cdw14);
+  pt.cmd.cdw15 = htole32(in.cdw15);
   pt.is_read = 1; // should we use in.direction()?
   
   int status = ioctl(get_fd(), NVME_PASSTHROUGH_CMD, &pt);
 
   if (status < 0)
     return set_err(errno, "NVME_PASSTHROUGH_CMD: %s", strerror(errno));
+#if __FreeBSD_version >= 1200058
+  nvme_completion_swapbytes(&pt.cpl);
+#endif
+  cp_p = &pt.cpl;
+  out.result=cp_p->cdw0; // Command specific result (DW0)
 
-  out.result=pt.cpl.cdw0; // Command specific result (DW0)
-
-  if (nvme_completion_is_error(&pt.cpl))
+  if (nvme_completion_is_error(cp_p)) {  /* ignore DNR and More bits */
     return set_nvme_err(out, nvme_completion_is_error(&pt.cpl));
+  }
 
   return true;
 }
@@ -640,7 +614,7 @@ bool freebsd_escalade_device::ata_pass_through(const ata_cmd_in & in, ata_cmd_ou
 
   if (m_disknum < 0) {
     printwarning(NO_DISK_3WARE,NULL);
-    return -1;
+    return false;
   }
 
   memset(ioctl_buffer, 0, TW_IOCTL_BUFFER_SIZE);
@@ -1102,7 +1076,7 @@ bool freebsd_scsi_device::scsi_pass_through(scsi_cmnd_io * iop)
     /* datalen */ iop->dxfer_len,
     /* senselen */ iop->max_sense_len,
     /* cdblen */ iop->cmnd_len,
-    /* timout (converted to seconds) */ iop->timeout*1000);
+    /* timeout (converted to seconds) */ iop->timeout*1000);
   memcpy(ccb->csio.cdb_io.cdb_bytes,iop->cmnd,iop->cmnd_len);
 
   if (cam_send_ccb(m_camdev,ccb) < 0) {
@@ -1478,6 +1452,8 @@ protected:
   virtual smart_device * get_custom_smart_device(const char * name, const char * type);
 
   virtual std::string get_valid_custom_dev_types_str();
+private:
+  bool get_nvme_devlist(smart_device_list & devlist, const char * type);
 };
 
 
@@ -1747,6 +1723,12 @@ bool freebsd_smart_interface::scan_smart_devices(smart_device_list & devlist,
     return false;
   }
 
+#ifdef WITH_NVME_DEVICESCAN // TODO: Remove when NVMe support is no longer EXPERIMENTAL
+  bool scan_nvme = !type || !strcmp(type, "nvme");
+#else
+  bool scan_nvme = type &&  !strcmp(type, "nvme");
+#endif
+
   // Make namelists
   char * * atanames = 0; int numata = 0;
   if (!type || !strcmp(type, "ata")) {
@@ -1789,9 +1771,31 @@ bool freebsd_smart_interface::scan_smart_devices(smart_device_list & devlist,
         devlist.push_back(scsidev);
     }
   }
+
+  if (scan_nvme)
+    get_nvme_devlist(devlist, type);
   return true;
 }
 
+bool freebsd_smart_interface::get_nvme_devlist(smart_device_list & devlist,
+    const char * type)
+{
+  char ctrlpath[64];
+
+  for (int ctrlr = 0;; ctrlr++) {
+    sprintf(ctrlpath, "%s%d", NVME_CTRLR_PREFIX, ctrlr);
+    int fd = ::open(ctrlpath, O_RDWR);
+    if (fd < 0)
+       break;
+    ::close(fd);
+    nvme_device * nvmedev = get_nvme_device(ctrlpath, type, 0);
+    if (nvmedev)
+        devlist.push_back(nvmedev);
+    else
+        break;
+ }
+  return true;
+}
 
 #if (FREEBSDVER < 800000) // without this build fail on FreeBSD 8
 static char done[USB_MAX_DEVICES];
@@ -1936,6 +1940,8 @@ smart_device * freebsd_smart_interface::autodetect_smart_device(const char * nam
   int i;
   const char * test_name = name;
 
+  memset(&ccb, 0, sizeof(ccb));
+
   // if dev_name null, or string length zero
   if (!name || !*name)
     return 0;
@@ -2008,7 +2014,7 @@ smart_device * freebsd_smart_interface::autodetect_smart_device(const char * nam
           if(usbdevlist(bus,vendor_id, product_id, version)){
             const char * usbtype = get_usb_dev_type_by_id(vendor_id, product_id, version);
             if (usbtype)
-              return get_sat_device(usbtype, new freebsd_scsi_device(this, test_name, ""));
+              return get_scsi_passthrough_device(usbtype, new freebsd_scsi_device(this, test_name, ""));
           }
           return 0;
         }
@@ -2033,6 +2039,8 @@ smart_device * freebsd_smart_interface::autodetect_smart_device(const char * nam
   // form /dev/nvme* or nvme*
   if(!strncmp("/dev/nvme", test_name, strlen("/dev/nvme")))
     return new freebsd_nvme_device(this, name, "", 0 /* use default nsid */);
+  if(!strncmp("/dev/nvd", test_name, strlen("/dev/nvd")))
+    set_err(EINVAL, "To monitor NVMe disks use /dev/nvme* device names");
 
   // device type unknown
   return 0;

@@ -3,22 +3,14 @@
  *
  * Home page of code is: http://www.smartmontools.org
  *
- * Copyright (C) 2003-8 Sergey Svishchev <smartmontools-support@lists.sourceforge.net>
+ * Copyright (C) 2003-8 Sergey Svishchev
  * Copyright (C) 2016 Kimihiro Nonaka
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "config.h"
-#include "int64.h"
+
 #include "atacmds.h"
 #include "scsicmds.h"
 #include "utility.h"
@@ -26,6 +18,7 @@
 
 #include <sys/drvctlio.h>
 #include <sys/utsname.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>
 
@@ -34,31 +27,6 @@
 
 const char * os_netbsd_cpp_cvsid = "$Id$"
   OS_NETBSD_H_CVSID;
-
-enum warnings {
-  BAD_SMART, MAX_MSG
-};
-
-/* Utility function for printing warnings */
-void
-printwarning(int msgNo, const char *extra)
-{
-  static int printed[] = {0, 0};
-  static const char *message[] = {
-    "Error: SMART Status command failed.\nPlease get assistance from \n" PACKAGE_HOMEPAGE "\nRegister values returned from SMART Status command are:\n",
-    PACKAGE_STRING " does not currently support twe(4) and twa(4) devices (3ware Escalade, Apache)\n",
-  };
-
-  if (msgNo >= 0 && msgNo <= MAX_MSG) {
-    if (!printed[msgNo]) {
-      printed[msgNo] = 1;
-      pout("%s", message[msgNo]);
-      if (extra)
-        pout("%s", extra);
-    }
-  }
-  return;
-}
 
 #define ARGUSED(x) ((void)(x))
 
@@ -206,7 +174,7 @@ bool netbsd_ata_device::ata_pass_through(const ata_cmd_in & in, ata_cmd_out & ou
   req.sec_count = in.in_regs.sector_count;
   req.sec_num = in.in_regs.lba_low;
   req.head = in.in_regs.device;
-  req.cylinder = le16toh(in.in_regs.lba_mid | (in.in_regs.lba_high << 8));
+  req.cylinder = in.in_regs.lba_mid | (in.in_regs.lba_high << 8);
 
   switch (in.direction) {
     case ata_cmd_in::no_data:
@@ -237,41 +205,14 @@ bool netbsd_ata_device::ata_pass_through(const ata_cmd_in & in, ata_cmd_out & ou
   out.out_regs.sector_count = req.sec_count;
   out.out_regs.lba_low = req.sec_num;
   out.out_regs.device = req.head;
-  out.out_regs.lba_mid = le16toh(req.cylinder);
-  out.out_regs.lba_high = le16toh(req.cylinder) >> 8;
+  out.out_regs.lba_mid = req.cylinder;
+  out.out_regs.lba_high = req.cylinder >> 8;
   out.out_regs.status = req.command;
-
-  // Command specific processing
-  if (in.in_regs.command == ATA_SMART_CMD
-       && in.in_regs.features == ATA_SMART_STATUS
-       && in.out_needed.lba_high)
-  {
-    unsigned const char normal_lo=0x4f, normal_hi=0xc2;
-    unsigned const char failed_lo=0xf4, failed_hi=0x2c;
-
-    // Cyl low and Cyl high unchanged means "Good SMART status"
-    if (!(out.out_regs.lba_mid==normal_lo && out.out_regs.lba_high==normal_hi)
-    // These values mean "Bad SMART status"
-        && !(out.out_regs.lba_mid==failed_lo && out.out_regs.lba_high==failed_hi))
-
-    {
-      // We haven't gotten output that makes sense; print out some debugging info
-      char buf[512];
-      snprintf(buf, sizeof(buf),
-        "CMD=0x%02x\nFR =0x%02x\nNS =0x%02x\nSC =0x%02x\nCL =0x%02x\nCH =0x%02x\nRETURN =0x%04x\n",
-        (int)req.command,
-        (int)req.features,
-        (int)req.sec_count,
-        (int)req.sec_num,
-        (int)(le16toh(req.cylinder) & 0xff),
-        (int)((le16toh(req.cylinder) >> 8) & 0xff),
-        (int)req.error);
-      printwarning(BAD_SMART,buf);
-      out.out_regs.lba_high = failed_hi;
-      out.out_regs.lba_mid = failed_lo;
-    }
+  /* Undo byte-swapping for IDENTIFY */
+  if (in.in_regs.command == ATA_IDENTIFY_DEVICE && isbigendian()) {
+     for (int i = 0; i < 256; i+=2)
+      swap2 ((char *)req.databuf + i);
   }
-
   return true;
 }
 
@@ -319,7 +260,7 @@ bool netbsd_nvme_device::open()
     }
     nsid = 0xFFFFFFFF; // broadcast id
   }
-  else if (sscanf(dev, NVME_PREFIX"%d"NVME_NS_PREFIX"%d%c",
+  else if (sscanf(dev, NVME_PREFIX "%d" NVME_NS_PREFIX "%d%c",
     &ctrlid, &nsid, &tmp) == 2)
   {
     if(ctrlid < 0 || nsid <= 0) {
@@ -595,21 +536,13 @@ std::string netbsd_smart_interface::get_app_examples(const char * appname)
 
     p = 'a' + getrawpartition();
     return strprintf(
-        "=================================================== SMARTCTL EXAMPLES =====\n\n"
-#ifdef HAVE_GETOPT_LONG
+      "=================================================== SMARTCTL EXAMPLES =====\n\n"
       "  smartctl -a /dev/wd0%c                      (Prints all SMART information)\n\n"
       "  smartctl --smart=on --offlineauto=on --saveauto=on /dev/wd0%c\n"
       "                                              (Enables SMART on first disk)\n\n"
       "  smartctl -t long /dev/wd0%c             (Executes extended disk self-test)\n\n"
       "  smartctl --attributes --log=selftest --quietmode=errorsonly /dev/wd0%c\n"
       "                                      (Prints Self-Test & Attribute errors)\n"
-#else
-      "  smartctl -a /dev/wd0%c                     (Prints all SMART information)\n"
-      "  smartctl -s on -o on -S on /dev/wd0%c        (Enables SMART on first disk)\n"
-      "  smartctl -t long /dev/wd0%c            (Executes extended disk self-test)\n"
-      "  smartctl -A -l selftest -q errorsonly /dev/wd0%c"
-      "                                      (Prints Self-Test & Attribute errors)\n"
-#endif
       , p, p, p, p);
   }
   return "";
@@ -669,6 +602,12 @@ int netbsd_smart_interface::get_dev_names(char ***names, const char *prefix)
     sprintf(mp[n], "%s%s%c", net_dev_raw_prefix, p, 'a' + getrawpartition());
     n++;
   }
+  free(disknames);
+
+  if (n == 0) {
+    free(mp);
+    return 0;
+  }
 
   char ** tmp = (char **)realloc(mp, n * (sizeof(char *)));
   if (NULL == tmp) {
@@ -717,7 +656,7 @@ bool netbsd_smart_interface::get_nvme_devlist(smart_device_list & devlist,
 
     uint32_t n = 0;
     for (int nsid = 1; n < laa.l_children; nsid++) {
-      snprintf(nspath, sizeof(nspath), NVME_PREFIX"%d"NVME_NS_PREFIX"%d",
+      snprintf(nspath, sizeof(nspath), NVME_PREFIX "%d" NVME_NS_PREFIX "%d",
         ctrl, nsid);
       if (stat(nspath, &sb) == -1 || !S_ISCHR(sb.st_mode))
         break;
@@ -750,7 +689,12 @@ bool netbsd_smart_interface::scan_smart_devices(smart_device_list & devlist,
 
   bool scan_ata = !*type || !strcmp(type, "ata");
   bool scan_scsi = !*type || !strcmp(type, "scsi") || !strcmp(type, "sat");
+
+#ifdef WITH_NVME_DEVICESCAN // TODO: Remove when NVMe support is no longer EXPERIMENTAL
   bool scan_nvme = !*type || !strcmp(type, "nvme");
+#else
+  bool scan_nvme =          !strcmp(type, "nvme");
+#endif
 
   // Make namelists
   char * * atanames = 0; int numata = 0;
@@ -829,24 +773,29 @@ smart_device * netbsd_smart_interface::autodetect_smart_device(const char * name
     }
   }
 
-  if (str_starts_with(test_name, net_dev_raw_prefix)) {
+  if (str_starts_with(test_name, net_dev_raw_prefix))
     test_name += strlen(net_dev_raw_prefix);
-    if (!strncmp(net_dev_ata_disk, test_name, strlen(net_dev_ata_disk)))
-      return get_ata_device(test_name, "ata");
-    if (!strncmp(net_dev_scsi_disk, test_name, strlen(net_dev_scsi_disk))) {
+  else if (str_starts_with(test_name, net_dev_prefix))
+    test_name += strlen(net_dev_prefix);
+  else
+    return 0; // device is not starting with /dev/ or /dev/r*
+
+  if (!strncmp(net_dev_ata_disk, test_name, strlen(net_dev_ata_disk)))
+    return get_ata_device(name, "ata");
+
+  if (!strncmp(net_dev_scsi_disk, test_name, strlen(net_dev_scsi_disk))) {
       // XXX Try to detect possible USB->(S)ATA bridge
       // XXX get USB vendor ID, product ID and version from sd(4)/umass(4).
       // XXX check sat device via get_usb_dev_type_by_id().
-
       // No USB bridge found, assume regular SCSI device
-      return get_scsi_device(test_name, "scsi");
-    }
-    if (!strncmp(net_dev_scsi_tape, test_name, strlen(net_dev_scsi_tape)))
-      return get_scsi_device(test_name, "scsi");
-  } else if (str_starts_with(test_name, net_dev_prefix)) {
-    if (!strncmp(NVME_PREFIX, test_name, strlen(NVME_PREFIX)))
-      return get_nvme_device(test_name, "nvme", 0 /* use default nsid */);
+      return get_scsi_device(name, "scsi");
   }
+
+  if (!strncmp(net_dev_scsi_tape, test_name, strlen(net_dev_scsi_tape)))
+    return get_scsi_device(name, "scsi");
+
+  if (!strncmp(net_dev_nvme_ctrl, test_name, strlen(net_dev_nvme_ctrl)))
+    return get_nvme_device(name, "nvme", 0 /* use default nsid */);
 
   // device type unknown
   return 0;

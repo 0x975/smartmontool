@@ -3,24 +3,11 @@
  *
  * Home page of code is: http://www.smartmontools.org
  *
- * Copyright (C) 2002-10 Bruce Allen <smartmontools-support@lists.sourceforge.net>
- * Copyright (C) 2008-10 Christian Franke <smartmontools-support@lists.sourceforge.net>
+ * Copyright (C) 2002-10 Bruce Allen
+ * Copyright (C) 2008-17 Christian Franke
  * Copyright (C) 2000 Michael Cornwell <cornwell@acm.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- *
- * This code was originally developed as a Senior Thesis by Michael Cornwell
- * at the Concurrent Systems Laboratory (now part of the Storage Systems
- * Research Center), Jack Baskin School of Engineering, University of
- * California, Santa Cruz. http://ssrc.soe.ucsc.edu/
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef SMARTCTL_H_
@@ -30,7 +17,7 @@
 
 // Return codes (bitmask)
 
-// command line did not parse, or internal error occured in smartctl
+// command line did not parse, or internal error occurred in smartctl
 #define FAILCMD   (0x01<<0)
 
 // device open failed
@@ -94,5 +81,23 @@ inline void print_off()
   if (printing_is_switchable)
     printing_is_off = true;
 }
+
+// The singleton global JSON object
+#include "json.h"
+extern json jglb;
+
+#include "utility.h" // __attribute_format_printf()
+// TODO: move this to a new include file?
+
+// Version of pout() for items already included in JSON output
+void jout(const char *fmt, ...)
+  __attribute_format_printf(1, 2);
+// Version of pout() for info/warning/error messages
+void jinf(const char *fmt, ...)
+  __attribute_format_printf(1, 2);
+void jwrn(const char *fmt, ...)
+__attribute_format_printf(1, 2);
+void jerr(const char *fmt, ...)
+__attribute_format_printf(1, 2);
 
 #endif

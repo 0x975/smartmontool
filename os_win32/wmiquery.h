@@ -3,16 +3,9 @@
  *
  * Home page of code is: http://www.smartmontools.org
  *
- * Copyright (C) 2011-15 Christian Franke
+ * Copyright (C) 2011-18 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef WMIQUERY_H
@@ -20,11 +13,7 @@
 
 #define WMIQUERY_H_CVSID "$Id$"
 
-#ifdef HAVE_WBEMCLI_H
 #include <wbemcli.h>
-#else
-#include "wbemcli_small.h"
-#endif
 
 #include <string>
 
@@ -168,11 +157,13 @@ public:
 
   /// Execute query, get result list.
   /// Return false on error.
-  bool vquery(wbem_enumerator & result, const char * qstr, va_list args) /*const*/;
+  bool vquery(wbem_enumerator & result, const char * qstr, va_list args) /*const*/
+       __attribute_format_printf(3, 0);
 
   /// Execute query, get single result object.
   /// Return false on error or result size != 1.
-  bool vquery1(wbem_object & obj, const char * qstr, va_list args) /*const*/;
+  bool vquery1(wbem_object & obj, const char * qstr, va_list args) /*const*/
+       __attribute_format_printf(3, 0);
 
   /// Version of vquery() with printf() formatting.
   bool query(wbem_enumerator & result, const char * qstr, ...) /*const*/

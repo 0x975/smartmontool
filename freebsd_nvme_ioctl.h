@@ -31,6 +31,7 @@
 
 #define	NVME_PASSTHROUGH_CMD	_IOWR('n', 0, struct nvme_pt_command)
 
+#if __FreeBSD_version < 1100110
 struct nvme_command
 {
 	/* dword 0 */
@@ -143,9 +144,14 @@ struct nvme_pt_command {
 	 */
 	struct mtx *		driver_lock;
 };
+#else
+#include <dev/nvme/nvme.h>
+#endif
 
+#if __FreeBSD_version < 1200058
 #define nvme_completion_is_error(cpl)					\
 	((cpl)->status.sc != 0 || (cpl)->status.sct != 0)
+#endif
 
 #define NVME_CTRLR_PREFIX	"/dev/nvme"
 #define NVME_NS_PREFIX		"ns"

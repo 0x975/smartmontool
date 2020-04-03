@@ -4,15 +4,9 @@
 ::
 :: Home page of code is: http://www.smartmontools.org
 ::
-:: Copyright (C) 2012-16 Christian Franke
+:: Copyright (C) 2012-17 Christian Franke
 ::
-:: This program is free software; you can redistribute it and/or modify
-:: it under the terms of the GNU General Public License as published by
-:: the Free Software Foundation; either version 2, or (at your option)
-:: any later version.
-::
-:: You should have received a copy of the GNU General Public License
-:: (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
+:: SPDX-License-Identifier: GPL-2.0-or-later
 ::
 :: $Id$
 ::
@@ -116,7 +110,7 @@ if not "!dryrun!" == "" (
 
 :: Check first address
 set first=
-for /F "tokens=1*" %%a in ("!SMARTD_ADDRESS!") do (set first=%%a)
+for /f "tokens=1*" %%a in ("!SMARTD_ADDRESS!") do (set first=%%a)
 set wtssend=
 if "!first!" == "console"   set wtssend=-c
 if "!first!" == "active"    set wtssend=-a
@@ -131,7 +125,7 @@ if not "!wtssend!" == "" (
     if errorlevel 1 set err=t
   )
   :: Remove first address
-  for /F "tokens=1*" %%a in ("!SMARTD_ADDRESS!") do (set SMARTD_ADDRESS=%%b)
+  for /f "tokens=1*" %%a in ("!SMARTD_ADDRESS!") do (set SMARTD_ADDRESS=%%b)
 )
 
 :: Make comma separated address list
@@ -143,8 +137,23 @@ if not "!SMARTD_ADDRESS!" == "" if "!SMARTD_MAILER!" == "" (
   if not exist smartd_mailer.conf.ps1 set SMARTD_MAILER=blat
 )
 
+:: Get mailer extension
+set ext=
+for /f "delims=" %%f in ("!SMARTD_MAILER!") do (set ext=%%~xf)
+
 :: Send mail or run command
-if not "!SMARTD_ADDRCSV!" == "" (
+if "!ext!" == ".ps1" (
+
+  :: Run PowerShell script
+  if not "!dryrun!" == "" (
+    set esc=^^
+    echo PowerShell -NoProfile -ExecutionPolicy Bypass -Command !esc!^& '!SMARTD_MAILER!' ^<nul
+  ) else (
+    PowerShell -NoProfile -ExecutionPolicy Bypass -Command ^& '!SMARTD_MAILER!' <nul
+    if errorlevel 1 set err=t
+  )
+
+) else ( if not "!SMARTD_ADDRCSV!" == "" (
 
   :: Send mail
   if "!SMARTD_MAILER!" == "" (
@@ -180,7 +189,7 @@ if not "!SMARTD_ADDRCSV!" == "" (
     if errorlevel 1 set err=t
   )
 
-))
+)))
 
 del "!SMARTD_FULLMSGFILE!" >nul 2>nul
 

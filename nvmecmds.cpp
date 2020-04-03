@@ -1,18 +1,11 @@
 /*
  * nvmecmds.cpp
  *
- * Home page of code is: http://www.smartmontools.org
+ * Home page of code is: https://www.smartmontools.org
  *
- * Copyright (C) 2016 Christian Franke
+ * Copyright (C) 2016-19 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "config.h"
@@ -22,18 +15,11 @@ const char * nvmecmds_cvsid = "$Id$"
   NVMECMDS_H_CVSID;
 
 #include "dev_interface.h"
-#include "atacmds.h" // swapx(), ASSERT_*(), dont_print_serial_number
+#include "atacmds.h" // swapx(), dont_print_serial_number
 #include "scsicmds.h" // dStrHex()
 #include "utility.h"
 
 using namespace smartmontools;
-
-// Check nvme_* struct sizes
-ASSERT_SIZEOF_STRUCT(nvme_id_ctrl, 4096);
-ASSERT_SIZEOF_STRUCT(nvme_id_ns, 4096);
-ASSERT_SIZEOF_STRUCT(nvme_error_log_page, 64);
-ASSERT_SIZEOF_STRUCT(nvme_smart_log, 512);
-
 
 // Print NVMe debug messages?
 unsigned char nvme_debugmode = 0;
@@ -56,7 +42,7 @@ static void debug_hex_dump(const void * data, unsigned size)
       sz = size;
   }
 
-  dStrHex(p, sz, 0);
+  dStrHex((const uint8_t *)p, sz, 0);
   if (sz < size)
     pout(" ...\n");
 }
@@ -196,7 +182,8 @@ bool nvme_read_id_ns(nvme_device * device, unsigned nsid, nvme_id_ns & id_ns)
 }
 
 // Read NVMe log page with identifier LID.
-bool nvme_read_log_page(nvme_device * device, unsigned char lid, void * data, unsigned size)
+bool nvme_read_log_page(nvme_device * device, unsigned char lid, void * data,
+	       		unsigned size, bool broadcast_nsid)
 {
   if (!(4 <= size && size <= 0x4000 && (size % 4) == 0))
     throw std::logic_error("nvme_read_log_page(): invalid size");
@@ -204,7 +191,7 @@ bool nvme_read_log_page(nvme_device * device, unsigned char lid, void * data, un
   memset(data, 0, size);
   nvme_cmd_in in;
   in.set_data_in(nvme_admin_get_log_page, data, size);
-  in.nsid = device->get_nsid();
+  in.nsid = broadcast_nsid ? 0xffffffff : device->get_nsid();
   in.cdw10 = lid | (((size / 4) - 1) << 16);
 
   return nvme_pass_through(device, in);
@@ -213,7 +200,7 @@ bool nvme_read_log_page(nvme_device * device, unsigned char lid, void * data, un
 // Read NVMe Error Information Log.
 bool nvme_read_error_log(nvme_device * device, nvme_error_log_page * error_log, unsigned num_entries)
 {
-  if (!nvme_read_log_page(device, 0x01, error_log, num_entries * sizeof(*error_log)))
+  if (!nvme_read_log_page(device, 0x01, error_log, num_entries * sizeof(*error_log), true))
     return false;
 
   if (isbigendian()) {
@@ -234,7 +221,7 @@ bool nvme_read_error_log(nvme_device * device, nvme_error_log_page * error_log, 
 // Read NVMe SMART/Health Information log.
 bool nvme_read_smart_log(nvme_device * device, nvme_smart_log & smart_log)
 {
-  if (!nvme_read_log_page(device, 0x02, &smart_log, sizeof(smart_log)))
+  if (!nvme_read_log_page(device, 0x02, &smart_log, sizeof(smart_log), true))
     return false;
 
   if (isbigendian()) {

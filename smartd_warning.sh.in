@@ -2,15 +2,11 @@
 #
 # smartd warning script
 #
-# Copyright (C) 2012-14 Christian Franke <smartmontools-support@lists.sourceforge.net>
+# Home page of code is: http://www.smartmontools.org
 #
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2, or (at your option)
-# any later version.
+# Copyright (C) 2012-16 Christian Franke
 #
-# You should have received a copy of the GNU General Public License
-# (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
 # $Id$
 #
@@ -18,6 +14,7 @@
 set -e
 
 # Set by config.status
+@ENABLE_SCRIPTPATH_TRUE@export PATH="@scriptpath@"
 PACKAGE="@PACKAGE@"
 VERSION="@VERSION@"
 prefix="@prefix@"
@@ -42,7 +39,7 @@ smartd $VERSION warning message script
 
 Usage:
   export SMARTD_MAILER='Path to external script, empty for "$os_mailer"'
-  export SMARTD_ADDRESS='Space separated mail adresses, empty if none'
+  export SMARTD_ADDRESS='Space separated mail addresses, empty if none'
   export SMARTD_MESSAGE='Error Message'
   export SMARTD_FAILTYPE='Type of failure, "EMailTest" for tests'
   export SMARTD_TFIRST='Date of first message sent, empty if none'

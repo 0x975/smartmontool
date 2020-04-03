@@ -1,22 +1,17 @@
 /*
  * atacmdnames.cpp
  *
- * Home page of code is: http://www.smartmontools.org
+ * Home page of code is: https://www.smartmontools.org
  *
- * Copyright (C) 2003-8 Philip Williams
- * Copyright (C) 2012 Christian Franke <smartmontools-support@lists.sourceforge.net>
+ * Copyright (C) 2003-08 Philip Williams
+ * Copyright (C) 2012-19 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "atacmdnames.h"
+#include "static_assert.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -308,8 +303,7 @@ const char * const command_table[] = {
   cmd_vendor_specific
 };
 
-typedef char ASSERT_command_table_size[
-  sizeof(command_table)/sizeof(command_table[0]) == 256 ? 1 : -1];
+STATIC_ASSERT(sizeof(command_table) == 256 * sizeof(command_table[0]));
 
 /* Returns the name of the command (and possibly sub-command) with the given
    command code and feature register values.   For most command codes this

@@ -1,7 +1,8 @@
 #! /bin/sh
 
 # smartmontools init file for smartd
-# Copyright (C) 2002-8 Bruce Allen <smartmontools-support@lists.sourceforge.net>
+# Copyright (C) 2002-8 Bruce Allen
+# SPDX-License-Identifier: GPL-2.0-or-later
 # $Id$
 
 # For RedHat and cousins:
@@ -22,18 +23,6 @@
 # Description:                Start S.M.A.R.T. disk and tape monitor.
 ### END INIT INFO
 
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the Free
-# Software Foundation; either version 2, or (at your option) any later
-# version. 
-# You should have received a copy of the GNU General Public License (for
-# example COPYING); if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-# This code was originally developed as a Senior Thesis by Michael Cornwell
-# at the Concurrent Systems Laboratory (now part of the Storage Systems
-# Research Center), Jack Baskin School of Engineering, University of
-# California, Santa Cruz. http://ssrc.soe.ucsc.edu/.
-
 # Uncomment the line below to pass options to smartd on startup. 
 # Note that distribution specific configuration files like
 # /etc/{default,sysconfig}/smartmontools might override these
@@ -45,7 +34,7 @@ report_unsupported () {
     echo "Currently the smartmontools package has no init script for"
     echo "the $1 OS/distribution. If you can provide one or this"
     echo "one works after removing some ifdefs, please contact"
-    echo "smartmontools-support@lists.sourceforge.net."
+    echo "smartmontools-support@listi.jpberlin.de."
     exit 1
 }
 
@@ -147,7 +136,7 @@ if [ -f /etc/redhat-release -o -f /etc/yellowdog-release -o -f /etc/mandrake-rel
 elif [ -f /etc/slackware-version ] ; then
 
     # Source configuration file.  This should define the shell variable smartd_opts.
-    # Email smartmontools-support@lists.sourceforge.net if there is a better choice
+    # Email smartmontools-support mailing list if there is a better choice
     # of path for Slackware.
 
     [ -r /etc/sysconfig/smartmontools ] && . /etc/sysconfig/smartmontools
@@ -436,65 +425,10 @@ elif [ -f /etc/environment.corel ] ; then
 
 # PLEASE ADD OTHER LINUX DISTRIBUTIONS JUST BEFORE THIS LINE, USING elif
 
-elif uname -a | grep FreeBSD > /dev/null 2>&1 ; then
-    # following is replaced by port install
-    PREFIX=@@PREFIX@@
-
-    # Updated to try both the RCNG version of things from 5.x, or fallback to
-    # oldfashioned rc.conf
-
-    if [ -r /etc/rc.subr ]; then
-	# This is RC-NG, pick up our values
-	. /etc/rc.subr
-	name="smartd"
-	rcvar="smartd_enable"
-	command="$SMARTD_BIN"
-	load_rc_config $name
-    elif [ -r /etc/defaults/rc.conf ]; then
-	# Not a 5.x system, try the default location for variables
-	. /etc/defaults/rc.conf
-	source_rc_confs
-    elif [ -r /etc/rc.conf ]; then
-	# Worst case, fallback to system config file
-	. /etc/rc.conf
-    fi
-
-    if [ -r /etc/rc.subr ]; then
-	# Use new functionality from RC-NG
-	run_rc_command "$1"
-    else
-	PID_FILE=/var/run/smartd.pid
-	case "$1" in
-	    start)
-		$SMARTD_BIN -p $PID_FILE $smartd_flags
-		echo -n " smartd"
-		;;
-	    stop)
-		kill `cat $PID_FILE`
-		echo -n " smartd"
-		;;
-	    restart)
-		$0 stop
-		sleep 1
-		$0 start
-		;;
-	    reload)
-		kill -s HUP `cat $PID_FILE`
-		;;
-	    report)
-		kill -s USR1 `cat $PID_FILE`
-		;;
-	    *)
-		echo "Usage: $0 {start|stop|restart|reload|report}"
-		exit 1
-	esac
-	exit 0
-    fi
-
 elif uname -a | grep SunOS > /dev/null 2>&1 ; then
 
     # Source configuration file.  This should define the shell variable smartd_opts.
-    # Email smartmontools-support@lists.sourceforge.net if there is a better choice
+    # Email smartmontools-support mailing list if there is a better choice
     # of path for Solaris
 
     [ -r /etc/default/smartmontools ] && . /etc/default/smartmontools
@@ -527,129 +461,6 @@ elif uname -a | grep SunOS > /dev/null 2>&1 ; then
     esac
     exit 0
 
-# Cygwin
-elif uname | grep -i CYGWIN > /dev/null 2>&1 ; then
-
-    # The following settings may be changed by the configuration file below
-    # Service Name (must be unique)
-    smartd_svcname=smartd
-    # Service display name
-    smartd_svcdisp="CYGWIN smartd"
-    # Service description
-    smartd_svcdesc="\
-Controls and monitors storage devices using the Self-Monitoring \
-Analysis and Reporting Technology System (S.M.A.R.T.) \
-built into ATA and SCSI Hard Drives. \
-http://www.smartmontools.org/"
-
-    # Source configuration file.  This should define the shell variable smartd_opts.
-    # Email smartmontools-support@lists.sourceforge.net if there is a better choice
-    # of path for Cygwin
-
-    [ -r /etc/sysconfig/smartmontools ] && . /etc/sysconfig/smartmontools
-
-    PID_FILE=/var/run/smartd.pid
-    RETVAL=0
-
-    # Note: "[ -r $PID_FILE ]" is not used here. On Cygwin, this command may
-    # return success even if the file is present but cannot be read by current user.
-    # If smartd is running as service, smartd.pid is owned by local system account
-    # which is different from any user ever executing this script.
-
-    case "$1" in
-        start)
-            if cygrunsrv -L 2>/dev/null | grep "^${smartd_svcname}$" >/dev/null 2>&1; then
-                echo -n "Starting service $smartd_svcname: "
-                cygrunsrv -S "$smartd_svcname"
-            else
-                echo -n "Starting smartd as daemon: "
-                $SMARTD_BIN -p $PID_FILE $smartd_opts
-            fi
-            RETVAL=$?
-            ;;
-        stop)
-            echo -n "Shutting down smartd: "
-            pid="`cat $PID_FILE 2>/dev/null`" && kill "$pid"
-            RETVAL=$?
-            ;;
-        reload)
-            echo -n "Reloading smartd configuration: "
-            pid="`cat $PID_FILE 2>/dev/null`" && kill -HUP "$pid"
-            RETVAL=$?
-            ;;
-        report)
-            echo -n "Checking SMART devices now: "
-            pid="`cat $PID_FILE 2>/dev/null`" && kill -USR1 "$pid"
-            RETVAL=$?
-            ;;
-        restart)
-            $0 stop
-            sleep 1
-            $0 start
-            exit $?
-            ;;
-        install)
-            shift
-            [ $# -eq 0 ] || smartd_opts="$*"
-            dep=; dep2=
-            if cygrunsrv -L 2>/dev/null | grep "^syslogd$" >/dev/null 2>&1; then
-                dep="syslogd"
-            fi
-            if cygrunsrv -L 2>/dev/null | grep "^syslog-ng" >/dev/null 2>&1; then
-                dep2="syslog-ng"
-            fi
-            if [ -z "$dep" ]; then
-                if [ -z "$dep2" ]; then
-                    echo "Warning: no syslog service installed, smartd will write to windows event log.";
-                else
-                    dep="$dep2"
-                fi
-            else
-                if [ -z "$dep2" ]; then
-                    :
-                else
-                    dep=
-                    echo "Warning: both syslogd and syslog-ng installed, dependency not set."
-                fi
-            fi
-            echo "Installing service ${smartd_svcname}${dep:+ (depending on '$dep')}${smartd_opts:+ with options '$smartd_opts'}:"
-            cygrunsrv -I "$smartd_svcname" -d "$smartd_svcdisp"  -f "$smartd_svcdesc" ${dep:+-y} $dep \
-              -e CYGWIN="$CYGWIN" -p $SMARTD_BIN -a "-n -p ${PID_FILE}${smartd_opts:+ }$smartd_opts"
-            RETVAL=$?
-            ;;
-        remove)
-            echo "Removing service $smartd_svcname:"
-            cygrunsrv -R "$smartd_svcname"
-            RETVAL=$?
-            ;;
-        status)
-            echo -n "Checking smartd status: "
-            if cygrunsrv -L 2>/dev/null | grep "^${smartd_svcname}$" >/dev/null 2>&1; then
-                if cygrunsrv -Q "$smartd_svcname" 2>/dev/null | grep "State *: Running" >/dev/null 2>&1; then
-                    echo "running as service '$smartd_svcname'."
-                elif ps -e 2>/dev/null | grep " ${SMARTD_BIN}$" >/dev/null 2>&1; then
-                    echo "installed as service '$smartd_svcname' but running as daemon."
-                else
-                    echo "installed as service '$smartd_svcname' but not running."
-                    RETVAL=1
-                fi
-            elif ps -e 2>/dev/null | grep " ${SMARTD_BIN}$" >/dev/null 2>&1; then
-                echo "running as daemon."
-            else
-                echo "not running."
-                RETVAL=1
-            fi
-            exit $RETVAL
-            ;;
-        *)
-            echo "Usage: $0 {start|stop|restart|reload|report|status}"
-            echo "       $0 {install [options]|remove}"
-            exit 1
-    esac
-
-    if [ "$RETVAL" -eq 0 ]; then echo "done"; else echo "ERROR"; fi
-    exit $RETVAL
-
 # Add other OSes HERE, using elif...
 else
     report_unsupported "Unknown"
@@ -658,5 +469,5 @@ fi
 # One should NEVER arrive here, except for a badly written case above,
 # that fails to exit.
 echo "SOMETHING IS WRONG WITH THE SMARTD STARTUP SCRIPT"
-echo "PLEASE CONTACT smartmontools-support@lists.sourceforge.net"
+echo "PLEASE CONTACT smartmontools-support@listi.jpberlin.de"
 exit 1

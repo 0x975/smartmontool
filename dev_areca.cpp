@@ -5,18 +5,10 @@
  *
  * Copyright (C) 2012 Hank Wu <hank@areca.com.tw>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "config.h"
-#include "int64.h"
 
 #include "dev_interface.h"
 #include "dev_areca.h"
@@ -131,8 +123,8 @@ int generic_areca_device::arcmsr_command_handler(unsigned long arcmsr_cmd, unsig
   struct scsi_cmnd_io iop;
   int dir = DXFER_TO_DEVICE;
 
-  UINT8 cdb[10]={0};
-  UINT8 sense[32]={0};
+  uint8_t cdb[10]={0};
+  uint8_t sense[32]={0};
 
   unsigned char *areca_return_packet;
   int total = 0;
@@ -157,6 +149,7 @@ int generic_areca_device::arcmsr_command_handler(unsigned long arcmsr_cmd, unsig
       sBuf.srbioctl.Length = data_len;
       memcpy((unsigned char *)sBuf.ioctldatabuffer, (unsigned char *)data, data_len);
     }
+    /* FALLTHRU */
     // commands for clearing related buffer of driver
   case ARCMSR_CLEAR_RQBUFFER:
   case ARCMSR_CLEAR_WQBUFFER:

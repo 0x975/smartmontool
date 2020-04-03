@@ -2,21 +2,11 @@
 #
 # $Id$
 #
-# Copyright (C) 2003-8 Bruce Allen <smartmontools-support@lists.sourceforge.net>
-# Copyright (C) 2009-14 Christian Franke <smartmontools-support@lists.sourceforge.net>
+# Copyright (C) 2003-08 Bruce Allen
+# Copyright (C) 2009-18 Christian Franke
 # 
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the Free
-# Software Foundation; either version 2, or (at your option) any later
-# version.
-# 
-# You should have received a copy of the GNU General Public License (for
-# example COPYING).  If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
-# This code was originally developed as a Senior Thesis by Michael Cornwell
-# at the Concurrent Systems Laboratory (now part of the Storage Systems
-# Research Center), Jack Baskin School of Engineering, University of
-# California, Santa Cruz. http://ssrc.soe.ucsc.edu/
 
 This directory contains executable shell scripts, that are intended for
 use with the
@@ -30,7 +20,7 @@ smartd and smartd.conf.
 should display those pages on your system.
 
 If you wish to contribute additional scripts to this collection,
-please email them to <smartmontools-support@lists.sourceforge.net>,
+please email them to <smartmontools-support@listi.jpberlin.de>,
 and include a brief description to use below.
 
 The files contained in this directory are:
@@ -56,3 +46,12 @@ Example5: Uses run-parts(8) to run scripts from /etc/smartmontools/run.d/.
 Example6: Sends a warning mail and then notifies the users by direct write
           to terminals.
           (/usr/libexec/smartmontools/smartdnotify from Fedora package)
+
+Example7: Sends an email using /usr/sbin/sendmail mail transfer agent.
+          May be useful if there is no other mail(1) compatible mailer
+          available.
+
+Example8: Sends an email using mail, mailx or sendmail mail transfer agent,
+          whichever is found first.  This script uses SMARTD_* environment
+          variables and could therefore also be used in a run-parts(8)
+          context like Example5.

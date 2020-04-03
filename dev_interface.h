@@ -1,18 +1,11 @@
 /*
  * dev_interface.h
  *
- * Home page of code is: http://www.smartmontools.org
+ * Home page of code is: https://www.smartmontools.org
  *
- * Copyright (C) 2008-16 Christian Franke
+ * Copyright (C) 2008-19 Christian Franke
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #ifndef DEV_INTERFACE_H
@@ -252,7 +245,7 @@ private:
   // Number of objects.
   static int s_num_objects;
 
-  // Prevent copy/assigment
+  // Prevent copy/assignment
   smart_device(const smart_device &);
   void operator=(const smart_device &);
 };
@@ -591,6 +584,18 @@ public:
   /// Returns false on error.
   virtual bool scsi_pass_through(scsi_cmnd_io * iop) = 0;
 
+  // Call scsi_pass_through and check sense.
+  bool scsi_pass_through_and_check(scsi_cmnd_io * iop,
+                                   const char * msg = "");
+
+  /// Always try READ CAPACITY(10) (rcap10) first but once we know
+  /// rcap16 is needed, use it instead.
+  void set_rcap16_first()
+    { rcap16_first = true; }
+
+  bool use_rcap16() const
+    { return rcap16_first; }
+
 protected:
   /// Hide/unhide SCSI interface.
   void hide_scsi(bool hide = true)
@@ -598,8 +603,12 @@ protected:
 
   /// Default constructor, registers device as SCSI.
   scsi_device()
-    : smart_device(never_called)
+    : smart_device(never_called),
+      rcap16_first(false)
     { hide_scsi(false); }
+
+private:
+  bool rcap16_first;
 };
 
 
@@ -848,7 +857,7 @@ public:
 private:
   std::vector<smart_device *> m_list;
 
-  // Prevent copy/assigment
+  // Prevent copy/assignment
   smart_device_list(const smart_device_list &);
   void operator=(const smart_device_list &);
 };
@@ -956,8 +965,9 @@ public:
   /// specified by some optional 'pattern'.
   /// Use platform specific default if 'type' is empty or 0.
   /// Return false on error.
+  /// Default implementation returns false;
   virtual bool scan_smart_devices(smart_device_list & devlist, const char * type,
-    const char * pattern = 0) = 0;
+    const char * pattern = 0);
 
   /// Fill 'devlist' with devices of all 'types' with device names
   /// specified by some optional 'pattern'.
@@ -992,12 +1002,31 @@ protected:
   /// Default implementation returns empty string.
   virtual std::string get_valid_custom_dev_types_str();
 
+  /// Return ATA->SCSI of NVMe->SCSI filter for a SAT, SNT or USB 'type'.
+  /// Uses get_sat_device and get_snt_device.
+  /// Return 0 and delete 'scsidev' on error.
+  virtual smart_device * get_scsi_passthrough_device(const char * type, scsi_device * scsidev);
+
   /// Return ATA->SCSI filter for a SAT or USB 'type'.
   /// Device 'scsidev' is used for SCSI access.
   /// Return 0 and delete 'scsidev' on error.
   /// Override only if platform needs special handling.
   virtual ata_device * get_sat_device(const char * type, scsi_device * scsidev);
   //{ implemented in scsiata.cpp }
+
+  /// Return NVMe->SCSI filter for a SNT or USB 'type'.
+  /// Device 'scsidev' is used for SCSI access.
+  /// Return 0 and delete 'scsidev' on error.
+  /// Override only if platform needs special handling.
+  virtual nvme_device * get_snt_device(const char * type, scsi_device * scsidev);
+  //{ implemented in scsinvme.cpp }
+
+  /// Return JMB93x->ATA filter.
+  /// Device 'smartdev' is used for ATA or SCSI R/W access.
+  /// Return 0 and delete 'scsidev' on error.
+  /// Override only if platform needs special handling.
+  virtual ata_device * get_jmb39x_device(const char * type, smart_device * smartdev);
+  //{ implemented in dev_jmb39x_raid.cpp }
 
 public:
   /// Try to detect a SAT device behind a SCSI interface.
@@ -1026,7 +1055,7 @@ private:
   friend smart_interface * smi(); // below
   static smart_interface * s_instance; ///< Pointer to the interface object.
 
-  // Prevent copy/assigment
+  // Prevent copy/assignment
   smart_interface(const smart_interface &);
   void operator=(const smart_interface &);
 };

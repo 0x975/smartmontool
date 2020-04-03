@@ -4,25 +4,17 @@
  * Home page of code is: http://www.smartmontools.org
  *
  * Copyright (C) 2002-11 Bruce Allen
- * Copyright (C) 2008-16 Christian Franke
+ * Copyright (C) 2008-18 Christian Franke
  * Copyright (C) 2000 Michael Cornwell <cornwell@acm.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * You should have received a copy of the GNU General Public License
- * (for example COPYING); If not, see <http://www.gnu.org/licenses/>.
- *
- * This code was originally developed as a Senior Thesis by Michael Cornwell
- * at the Concurrent Systems Laboratory (now part of the Storage Systems
- * Research Center), Jack Baskin School of Engineering, University of
- * California, Santa Cruz. http://ssrc.soe.ucsc.edu/
- *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "config.h"
+#define __STDC_FORMAT_MACROS 1 // enable PRI* for C++
+
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <string.h>
@@ -30,8 +22,6 @@
 #include <stdarg.h>
 #include <stdexcept>
 #include <getopt.h>
-
-#include "config.h"
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -41,7 +31,6 @@
 #include <sys/param.h>
 #endif
 
-#include "int64.h"
 #include "atacmds.h"
 #include "dev_interface.h"
 #include "ataprint.h"
@@ -51,6 +40,7 @@
 #include "nvmeprint.h"
 #include "smartctl.h"
 #include "utility.h"
+#include "svnversion.h"
 
 const char * smartctl_cpp_cvsid = "$Id$"
   CONFIG_H_CVSID SMARTCTL_H_CVSID;
@@ -59,9 +49,17 @@ const char * smartctl_cpp_cvsid = "$Id$"
 bool printing_is_switchable = false;
 bool printing_is_off = false;
 
+// Control JSON output
+json jglb;
+static bool print_as_json = false;
+static json::print_options print_as_json_options;
+static bool print_as_json_output = false;
+static bool print_as_json_impl = false;
+static bool print_as_json_unimpl = false;
+
 static void printslogan()
 {
-  pout("%s\n", format_version_info("smartctl").c_str());
+  jout("%s\n", format_version_info("smartctl").c_str());
 }
 
 static void UsageSummary()
@@ -70,13 +68,47 @@ static void UsageSummary()
   return;
 }
 
+static void js_initialize(int argc, char **argv, bool verbose)
+{
+  if (jglb.is_enabled())
+    return;
+  jglb.enable();
+  if (verbose)
+    jglb.set_verbose();
+
+  // Major.minor version of JSON format
+  jglb["json_format_version"][0] = 1;
+  jglb["json_format_version"][1] = 0;
+
+  // Smartctl version info
+  json::ref jref = jglb["smartctl"];
+  int ver[3] = { 0, 0, 0 };
+  sscanf(PACKAGE_VERSION, "%d.%d.%d", ver, ver+1, ver+2);
+  jref["version"][0] = ver[0];
+  jref["version"][1] = ver[1];
+  if (ver[2] > 0)
+    jref["version"][2] = ver[2];
+
+#ifdef SMARTMONTOOLS_SVN_REV
+  jref["svn_revision"] = SMARTMONTOOLS_SVN_REV;
+#endif
+  jref["platform_info"] = smi()->get_os_version_str();
+#ifdef BUILD_INFO
+  jref["build_info"] = BUILD_INFO;
+#endif
+
+  jref["argv"][0] = "smartctl";
+  for (int i = 1; i < argc; i++)
+    jref["argv"][i] = argv[i];
+}
+
 static std::string getvalidarglist(int opt);
 
 /*  void prints help information for command syntax */
 static void Usage()
 {
-  printf("Usage: smartctl [options] device\n\n");
-  printf(
+  pout("Usage: smartctl [options] device\n\n");
+  pout(
 "============================================ SHOW INFORMATION OPTIONS =====\n\n"
 "  -h, --help, --usage\n"
 "         Display this help and exit\n\n"
@@ -87,7 +119,8 @@ static void Usage()
 "  --identify[=[w][nvb]]\n"
 "         Show words and bits from IDENTIFY DEVICE data                (ATA)\n\n"
 "  -g NAME, --get=NAME\n"
-"        Get device setting: all, aam, apm, lookahead, security, wcache, rcache, wcreorder, wcache-sct\n\n"
+"        Get device setting: all, aam, apm, dsn, lookahead, security,\n"
+"        wcache, rcache, wcreorder, wcache-sct\n\n"
 "  -a, --all\n"
 "         Show all SMART information for device\n\n"
 "  -x, --xall\n"
@@ -97,22 +130,25 @@ static void Usage()
 "  --scan-open\n"
 "         Scan for devices and try to open each device\n\n"
   );
-  printf(
+  pout(
 "================================== SMARTCTL RUN-TIME BEHAVIOR OPTIONS =====\n\n"
+"  -j, --json[=[cgiosuv]]\n"
+"         Print output in JSON format\n\n"
 "  -q TYPE, --quietmode=TYPE                                           (ATA)\n"
 "         Set smartctl quiet mode to one of: errorsonly, silent, noserial\n\n"
 "  -d TYPE, --device=TYPE\n"
-"         Specify device type to one of: %s\n\n"
+"         Specify device type to one of:\n"
+"         %s\n\n" // TODO: fold this string
 "  -T TYPE, --tolerance=TYPE                                           (ATA)\n"
 "         Tolerance: normal, conservative, permissive, verypermissive\n\n"
 "  -b TYPE, --badsum=TYPE                                              (ATA)\n"
 "         Set action on bad checksum to one of: warn, exit, ignore\n\n"
 "  -r TYPE, --report=TYPE\n"
 "         Report transactions (see man page)\n\n"
-"  -n MODE, --nocheck=MODE                                             (ATA)\n"
+"  -n MODE[,STATUS], --nocheck=MODE[,STATUS]                           (ATA)\n"
 "         No check if: never, sleep, standby, idle (see man page)\n\n",
   getvalidarglist('d').c_str()); // TODO: Use this function also for other options ?
-  printf(
+  pout(
 "============================== DEVICE FEATURE ENABLE/DISABLE COMMANDS =====\n\n"
 "  -s VALUE, --smart=VALUE\n"
 "        Enable/disable SMART on device (on/off)\n\n"
@@ -122,11 +158,11 @@ static void Usage()
 "        Enable/disable Attribute autosave on device (on/off)\n\n"
 "  -s NAME[,VALUE], --set=NAME[,VALUE]\n"
 "        Enable/disable/change device setting: aam,[N|off], apm,[N|off],\n"
-"        lookahead,[on|off], security-freeze, standby,[N|off|now],\n"
-"        wcache,[on|off], rcache,[on|off], wcreorder,[on|off[,p]]\n"
-"        wcache-sct,[ata|on|off[,p]]\n\n"
+"        dsn,[on|off], lookahead,[on|off], security-freeze,\n"
+"        standby,[N|off|now], wcache,[on|off], rcache,[on|off],\n"
+"        wcreorder,[on|off[,p]], wcache-sct,[ata|on|off[,p]]\n\n"
   );
-  printf(
+  pout(
 "======================================= READ AND DISPLAY DATA OPTIONS =====\n\n"
 "  -H, --health\n"
 "        Show device SMART health status\n\n"
@@ -138,12 +174,10 @@ static void Usage()
 "        Set output format for attributes: old, brief, hex[,id|val]\n\n"
 "  -l TYPE, --log=TYPE\n"
 "        Show device log. TYPE: error, selftest, selective, directory[,g|s],\n"
-"                               xerror[,N][,error], xselftest[,N][,selftest],\n"
-"                               background, sasphy[,reset], sataphy[,reset],\n"
-"                               scttemp[sts,hist], scttempint,N[,p],\n"
-"                               scterc[,N,M], devstat[,N], ssd,\n"
-"                               gplog,N[,RANGE], smartlog,N[,RANGE],\n"
-"                               nvmelog,N,SIZE\n\n"
+"        xerror[,N][,error], xselftest[,N][,selftest], background,\n"
+"        sasphy[,reset], sataphy[,reset], scttemp[sts,hist],\n"
+"        scttempint,N[,p], scterc[,N,M], devstat[,N], defects[,N], ssd,\n"
+"        gplog,N[,RANGE], smartlog,N[,RANGE], nvmelog,N,SIZE\n\n"
 "  -v N,OPTION , --vendorattribute=N,OPTION                            (ATA)\n"
 "        Set display OPTION for vendor Attribute N (see man page)\n\n"
 "  -F TYPE, --firmwarebug=TYPE                                         (ATA)\n"
@@ -158,13 +192,13 @@ static void Usage()
     get_drivedb_path_add()
   );
 #ifdef SMARTMONTOOLS_DRIVEDBDIR
-  printf(
+  pout(
                       "\n"
 "         and then    %s",
     get_drivedb_path_default()
   );
 #endif
-  printf(
+  pout(
          "]\n\n"
 "============================================ DEVICE SELF-TEST OPTIONS =====\n\n"
 "  -t TEST, --test=TEST\n"
@@ -177,7 +211,7 @@ static void Usage()
 );
   std::string examples = smi()->get_app_examples("smartctl");
   if (!examples.empty())
-    printf("%s\n", examples.c_str());
+    pout("%s\n", examples.c_str());
 }
 
 // Values for  --long only options, see parse_options()
@@ -196,6 +230,8 @@ static std::string getvalidarglist(int opt)
     return "normal, conservative, permissive, verypermissive";
   case 'b':
     return "warn, exit, ignore";
+  case 'B':
+    return "[+]<FILE_NAME>";
   case 'r':
     return "ioctl[,N], ataioctl[,N], scsiioctl[,N], nvmeioctl[,N]";
   case opt_smart:
@@ -207,7 +243,7 @@ static std::string getvalidarglist(int opt)
            "xerror[,N][,error], xselftest[,N][,selftest], "
            "background, sasphy[,reset], sataphy[,reset], "
            "scttemp[sts,hist], scttempint,N[,p], "
-           "scterc[,N,M], devstat[,N], ssd, "
+           "scterc[,N,M], devstat[,N], defects[,N], ssd, "
            "gplog,N[,RANGE], smartlog,N[,RANGE], "
            "nvmelog,N,SIZE";
   case 'P':
@@ -218,17 +254,19 @@ static std::string getvalidarglist(int opt)
   case 'F':
     return std::string(get_valid_firmwarebug_args()) + ", swapid";
   case 'n':
-    return "never, sleep, standby, idle";
+    return "never, sleep[,STATUS], standby[,STATUS], idle[,STATUS]";
   case 'f':
     return "old, brief, hex[,id|val]";
   case 'g':
-    return "aam, apm, lookahead, security, wcache, rcache, wcreorder, wcache-sct";
+    return "aam, apm, dsn, lookahead, security, wcache, rcache, wcreorder, wcache-sct";
   case opt_set:
-    return "aam,[N|off], apm,[N|off], lookahead,[on|off], security-freeze, "
+    return "aam,[N|off], apm,[N|off], dsn,[on|off], lookahead,[on|off], security-freeze, "
            "standby,[N|off|now], wcache,[on|off], rcache,[on|off], wcreorder,[on|off[,p]], "
            "wcache-sct,[ata|on|off[,p]]";
   case 's':
     return getvalidarglist(opt_smart)+", "+getvalidarglist(opt_set);
+  case 'j':
+    return "c, g, i, o, s, u, v";
   case opt_identify:
     return "n, wn, w, v, wv, wb";
   case 'v':
@@ -242,7 +280,7 @@ static std::string getvalidarglist(int opt)
 static void printvalidarglistmessage(int opt)
 {
   if (opt=='v'){
-    pout("=======> VALID ARGUMENTS ARE:\n\thelp\n%s\n<=======\n",
+    jerr("=======> VALID ARGUMENTS ARE:\n\thelp\n%s\n<=======\n",
          create_vendor_attribute_arg_list().c_str());
   }
   else {
@@ -250,7 +288,7 @@ static void printvalidarglistmessage(int opt)
   // need to figure out which to get the formatting right.
     std::string s = getvalidarglist(opt);
     char separator = strchr(s.c_str(), '\n') ? '\n' : ' ';
-    pout("=======> VALID ARGUMENTS ARE:%c%s%c<=======\n", separator, s.c_str(), separator);
+    jerr("=======> VALID ARGUMENTS ARE:%c%s%c<=======\n", separator, s.c_str(), separator);
   }
 
   return;
@@ -267,12 +305,12 @@ static void scan_devices(const smart_devtype_list & types, bool with_open, char 
 
 
 /*      Takes command options and sets features to be run */    
-static const char * parse_options(int argc, char** argv,
+static int parse_options(int argc, char** argv, const char * & type,
   ata_print_options & ataopts, scsi_print_options & scsiopts,
   nvme_print_options & nvmeopts, bool & print_type_only)
 {
   // Please update getvalidarglist() if you edit shortopts
-  const char *shortopts = "h?Vq:d:T:b:r:s:o:S:HcAl:iaxv:P:t:CXF:n:B:f:g:";
+  const char *shortopts = "h?Vq:d:T:b:r:s:o:S:HcAl:iaxv:P:t:CXF:n:B:f:g:j";
   // Please update getvalidarglist() if you edit longopts
   struct option longopts[] = {
     { "help",            no_argument,       0, 'h' },
@@ -305,6 +343,7 @@ static const char * parse_options(int argc, char** argv,
     { "drivedb",         required_argument, 0, 'B' },
     { "format",          required_argument, 0, 'f' },
     { "get",             required_argument, 0, 'g' },
+    { "json",            optional_argument, 0, 'j' },
     { "identify",        optional_argument, 0, opt_identify },
     { "set",             required_argument, 0, opt_set },
     { "scan",            no_argument,       0, opt_scan      },
@@ -316,7 +355,6 @@ static const char * parse_options(int argc, char** argv,
   memset(extraerror, 0, sizeof(extraerror));
   opterr=optopt=0;
 
-  const char * type = 0; // set to -d optarg
   smart_devtype_list scan_types; // multiple -d TYPE options for --scan
   bool use_default_db = true; // set false on '-B FILE'
   bool output_format_set = false; // set true on '-f FORMAT'
@@ -328,12 +366,19 @@ static const char * parse_options(int argc, char** argv,
   char *arg;
 
   while ((optchar = getopt_long(argc, argv, shortopts, longopts, 0)) != -1) {
+
+    // Clang analyzer: Workaround for false positive messages
+    // 'Dereference of null pointer' and 'Null pointer argument'
+    bool optarg_is_set = !!optarg;
+    #ifdef __clang_analyzer__
+    if (!optarg_is_set) optarg = (char *)"";
+    #endif
+
     switch (optchar){
     case 'V':
       printing_is_off = false;
       pout("%s", format_version_info("smartctl", true /*full*/).c_str());
-      EXIT(0);
-      break;
+      return 0;
     case 'q':
       if (!strcmp(optarg,"errorsonly")) {
         printing_is_switchable = true;
@@ -528,6 +573,17 @@ static const char * parse_options(int argc, char** argv,
               badarg = true;
         }
 
+      } else if (str_starts_with(optarg, "defects")) {
+        int n1 = -1, n2 = -1, len = strlen(optarg);
+        unsigned val = ~0;
+        sscanf(optarg, "defects%n,%u%n", &n1, &val, &n2);
+        if (n1 == len)
+          ataopts.pending_defects_log = 31; // Entries of first page
+        else if (n2 == len && val <= 0xffff * 32 - 1)
+          ataopts.pending_defects_log = val;
+        else
+          badarg = true;
+
       } else if (!strncmp(optarg, "xerror", sizeof("xerror")-1)) {
         int n1 = -1, n2 = -1, len = strlen(optarg);
         unsigned val = 8;
@@ -622,7 +678,7 @@ static const char * parse_options(int argc, char** argv,
 
     case opt_identify:
       ataopts.identify_word_level = ataopts.identify_bit_level = 0;
-      if (optarg) {
+      if (optarg_is_set) {
         for (int i = 0; optarg[i]; i++) {
           switch (optarg[i]) {
             case 'w': ataopts.identify_word_level = 1; break;
@@ -664,11 +720,13 @@ static const char * parse_options(int argc, char** argv,
       ataopts.sct_erc_get = true;
       ataopts.sct_wcache_reorder_get = true;
       ataopts.devstat_all_pages = true;
+      ataopts.pending_defects_log = 31;
       ataopts.sataphy = true;
       ataopts.get_set_used = true;
       ataopts.get_aam = ataopts.get_apm = true;
       ataopts.get_security = true;
       ataopts.get_lookahead = ataopts.get_wcache = true;
+      ataopts.get_dsn = true;
       scsiopts.get_rcd = scsiopts.get_wce = true;
       scsiopts.smart_background_log = true;
       scsiopts.smart_ss_media_log = true;
@@ -683,7 +741,7 @@ static const char * parse_options(int argc, char** argv,
         printslogan();
         pout("The valid arguments to -v are:\n\thelp\n%s\n",
              create_vendor_attribute_arg_list().c_str());
-        EXIT(0);
+        return 0;
       }
       if (!parse_attribute_def(optarg, ataopts.attribute_defs, PRIOR_USER))
         badarg = true;
@@ -697,14 +755,14 @@ static const char * parse_options(int argc, char** argv,
         ataopts.show_presets = true;
       } else if (!strcmp(optarg, "showall")) {
         if (!init_drive_database(use_default_db))
-          EXIT(FAILCMD);
+          return FAILCMD;
         if (optind < argc) { // -P showall MODEL [FIRMWARE]
           int cnt = showmatchingpresets(argv[optind], (optind+1<argc ? argv[optind+1] : NULL));
-          EXIT(cnt); // report #matches
+          return (cnt >= 0 ? cnt : 0);
         }
         if (showallpresets())
-          EXIT(FAILCMD); // report regexp syntax error
-        EXIT(0);
+          return FAILCMD; // report regexp syntax error
+        return 0;
       } else {
         badarg = true;
       }
@@ -800,16 +858,25 @@ static const char * parse_options(int argc, char** argv,
       break;
     case 'n':
       // skip disk check if in low-power mode
-      if (!strcmp(optarg, "never"))
+      if (!strcmp(optarg, "never")) {
         ataopts.powermode = 1; // do not skip, but print mode
-      else if (!strcmp(optarg, "sleep"))
-        ataopts.powermode = 2;
-      else if (!strcmp(optarg, "standby"))
-        ataopts.powermode = 3;
-      else if (!strcmp(optarg, "idle"))
-        ataopts.powermode = 4;
-      else
-        badarg = true;
+      }
+      else {
+        int n1 = -1, n2 = -1, len = strlen(optarg);
+        char s[7+1]; unsigned i = FAILPOWER;
+        sscanf(optarg, "%9[a-z]%n,%u%n", s, &n1, &i, &n2);
+        if (!((n1 == len || n2 == len) && i <= 255))
+          badarg = true;
+        else if (!strcmp(s, "sleep"))
+          ataopts.powermode = 2;
+        else if (!strcmp(s, "standby"))
+          ataopts.powermode = 3;
+        else if (!strcmp(s, "idle"))
+          ataopts.powermode = 4;
+        else
+          badarg = true;
+        ataopts.powerexit = i;
+      }
       break;
     case 'f':
       if (!strcmp(optarg, "old")) {
@@ -838,15 +905,14 @@ static const char * parse_options(int argc, char** argv,
         else
           use_default_db = false;
         if (!read_drive_database(path))
-          EXIT(FAILCMD);
+          return FAILCMD;
       }
       break;
     case 'h':
       printing_is_off = false;
       printslogan();
       Usage();
-      EXIT(0);  
-      break;
+      return 0;
 
     case 'g':
     case_s_continued: // -s, see above
@@ -887,6 +953,7 @@ static const char * parse_options(int argc, char** argv,
             ataopts.get_aam = ataopts.get_apm = true;
             ataopts.get_security = true;
             ataopts.get_lookahead = ataopts.get_wcache = true;
+            ataopts.get_dsn = true;
             scsiopts.get_rcd = scsiopts.get_wce = true;
           }
           else if (!strcmp(name, "aam")) {
@@ -995,6 +1062,19 @@ static const char * parse_options(int argc, char** argv,
             else
               badarg = true;
           }
+          else if (!strcmp(name, "dsn")) {
+            if (get) {
+              ataopts.get_dsn = true;
+            }
+            else if (off) {
+              ataopts.set_dsn = -1;
+            }
+            else if (on) {
+              ataopts.set_dsn = 1;
+            }
+            else
+              badarg = true;
+          }
           else
             badarg = true;
         }
@@ -1008,6 +1088,33 @@ static const char * parse_options(int argc, char** argv,
       scan = optchar;
       break;
 
+    case 'j':
+      {
+        print_as_json = true;
+        print_as_json_options.pretty = true;
+        print_as_json_options.sorted = false;
+        print_as_json_options.flat = false;
+        print_as_json_output = false;
+        print_as_json_impl = print_as_json_unimpl = false;
+        bool json_verbose = false;
+        if (optarg_is_set) {
+          for (int i = 0; optarg[i]; i++) {
+            switch (optarg[i]) {
+              case 'c': print_as_json_options.pretty = false; break;
+              case 'g': print_as_json_options.flat = true; break;
+              case 'i': print_as_json_impl = true; break;
+              case 'o': print_as_json_output = true; break;
+              case 's': print_as_json_options.sorted = true; break;
+              case 'u': print_as_json_unimpl = true; break;
+              case 'v': json_verbose = true; break;
+              default: badarg = true;
+            }
+          }
+        }
+        js_initialize(argc, argv, json_verbose);
+      }
+      break;
+
     case '?':
     default:
       printing_is_off = false;
@@ -1018,31 +1125,31 @@ static const char * parse_options(int argc, char** argv,
       if (arg[1] == '-' && optchar != 'h') {
         // Iff optopt holds a valid option then argument must be missing.
         if (optopt && (optopt >= opt_scan || strchr(shortopts, optopt))) {
-          pout("=======> ARGUMENT REQUIRED FOR OPTION: %s\n", arg+2);
+          jerr("=======> ARGUMENT REQUIRED FOR OPTION: %s\n", arg+2);
           printvalidarglistmessage(optopt);
         } else
-          pout("=======> UNRECOGNIZED OPTION: %s\n",arg+2);
+          jerr("=======> UNRECOGNIZED OPTION: %s\n",arg+2);
 	if (extraerror[0])
 	  pout("=======> %s", extraerror);
         UsageSummary();
-        EXIT(FAILCMD);
+        return FAILCMD;
       }
       if (0 < optopt && optopt < '~') {
         // Iff optopt holds a valid option then argument must be
         // missing.  Note (BA) this logic seems to fail using Solaris
         // getopt!
         if (strchr(shortopts, optopt) != NULL) {
-          pout("=======> ARGUMENT REQUIRED FOR OPTION: %c\n", optopt);
+          jerr("=======> ARGUMENT REQUIRED FOR OPTION: %c\n", optopt);
           printvalidarglistmessage(optopt);
         } else
-          pout("=======> UNRECOGNIZED OPTION: %c\n",optopt);
+          jerr("=======> UNRECOGNIZED OPTION: %c\n",optopt);
 	if (extraerror[0])
 	  pout("=======> %s", extraerror);
         UsageSummary();
-        EXIT(FAILCMD);
+        return FAILCMD;
       }
       Usage();
-      EXIT(0);  
+      return 0;
     } // closes switch statement to process command-line options
     
     // Check to see if option had an unrecognized or incorrect argument.
@@ -1052,15 +1159,16 @@ static const char * parse_options(int argc, char** argv,
       // here, but we just print the short form.  Please fix this if you know
       // a clean way to do it.
       char optstr[] = { (char)optchar, 0 };
-      pout("=======> INVALID ARGUMENT TO -%s: %s\n",
+      jerr("=======> INVALID ARGUMENT TO -%s: %s\n",
         (optchar == opt_identify ? "-identify" :
          optchar == opt_set ? "-set" :
-         optchar == opt_smart ? "-smart" : optstr), optarg);
+         optchar == opt_smart ? "-smart" :
+         optchar == 'j' ? "-json" : optstr), optarg);
       printvalidarglistmessage(optchar);
       if (extraerror[0])
 	pout("=======> %s", extraerror);
       UsageSummary();
-      EXIT(FAILCMD);
+      return FAILCMD;
     }
   }
 
@@ -1068,9 +1176,9 @@ static const char * parse_options(int argc, char** argv,
   if (scan) {
     // Read or init drive database to allow USB ID check.
     if (!init_drive_database(use_default_db))
-      EXIT(FAILCMD);
+      return FAILCMD;
     scan_devices(scan_types, (scan == opt_scan_open), argv + optind);
-    EXIT(0);
+    return 0;
   }
 
   // At this point we have processed all command-line options.  If the
@@ -1083,18 +1191,18 @@ static const char * parse_options(int argc, char** argv,
   if (scan_types.size() > 1) {
     printing_is_off = false;
     printslogan();
-    pout("ERROR: multiple -d TYPE options are only allowed with --scan\n");
+    jerr("ERROR: multiple -d TYPE options are only allowed with --scan\n");
     UsageSummary();
-    EXIT(FAILCMD);
+    return FAILCMD;
   }
 
   // error message if user has asked for more than one test
   if (testcnt > 1) {
     printing_is_off = false;
     printslogan();
-    pout("\nERROR: smartctl can only run a single test type (or abort) at a time.\n");
+    jerr("\nERROR: smartctl can only run a single test type (or abort) at a time.\n");
     UsageSummary();
-    EXIT(FAILCMD);
+    return FAILCMD;
   }
 
   // error message if user has set selective self-test options without
@@ -1104,11 +1212,11 @@ static const char * parse_options(int argc, char** argv,
     printing_is_off = false;
     printslogan();
     if (ataopts.smart_selective_args.pending_time)
-      pout("\nERROR: smartctl -t pending,N must be used with -t select,N-M.\n");
+      jerr("\nERROR: smartctl -t pending,N must be used with -t select,N-M.\n");
     else
-      pout("\nERROR: smartctl -t afterselect,(on|off) must be used with -t select,N-M.\n");
+      jerr("\nERROR: smartctl -t afterselect,(on|off) must be used with -t select,N-M.\n");
     UsageSummary();
-    EXIT(FAILCMD);
+    return FAILCMD;
   }
 
   // If captive option was used, change test type if appropriate.
@@ -1137,51 +1245,154 @@ static const char * parse_options(int argc, char** argv,
   
   // Warn if the user has provided no device name
   if (argc-optind<1){
-    pout("ERROR: smartctl requires a device name as the final command-line argument.\n\n");
+    jerr("ERROR: smartctl requires a device name as the final command-line argument.\n\n");
     UsageSummary();
-    EXIT(FAILCMD);
+    return FAILCMD;
   }
   
   // Warn if the user has provided more than one device name
   if (argc-optind>1){
     int i;
-    pout("ERROR: smartctl takes ONE device name as the final command-line argument.\n");
+    jerr("ERROR: smartctl takes ONE device name as the final command-line argument.\n");
     pout("You have provided %d device names:\n",argc-optind);
     for (i=0; i<argc-optind; i++)
       pout("%s\n",argv[optind+i]);
     UsageSummary();
-    EXIT(FAILCMD);
+    return FAILCMD;
   }
 
   // Read or init drive database
   if (!init_drive_database(use_default_db))
-    EXIT(FAILCMD);
+    return FAILCMD;
 
-  return type;
+  // No error, continue in main_worker()
+  return -1;
 }
 
-// Printing function (controlled by global printing_is_off)
-// [From GLIBC Manual: Since the prototype doesn't specify types for
-// optional arguments, in a call to a variadic function the default
-// argument promotions are performed on the optional argument
-// values. This means the objects of type char or short int (whether
-// signed or not) are promoted to either int or unsigned int, as
-// appropriate.]
-void pout(const char *fmt, ...){
-  va_list ap;
-  
-  // initialize variable argument list 
-  va_start(ap,fmt);
-  if (printing_is_off) {
-    va_end(ap);
-    return;
-  }
+// Printing functions
 
-  // print out
-  vprintf(fmt,ap);
+__attribute_format_printf(3, 0)
+static void vjpout(bool is_js_impl, const char * msg_severity,
+                   const char *fmt, va_list ap)
+{
+  if (!print_as_json) {
+    // Print out directly
+    vprintf(fmt, ap);
+    fflush(stdout);
+  }
+  else {
+    // Add lines to JSON output
+    static char buf[1024];
+    static char * bufnext = buf;
+    vsnprintf(bufnext, sizeof(buf) - (bufnext - buf), fmt, ap);
+    for (char * p = buf, *q; ; p = q) {
+      if (!(q = strchr(p, '\n'))) {
+        // Keep remaining line for next call
+        for (bufnext = buf; *p; bufnext++, p++)
+          *bufnext = *p;
+        break;
+      }
+      *q++ = 0; // '\n' -> '\0'
+
+      static int lineno = 0;
+      lineno++;
+      if (print_as_json_output) {
+        // Collect full output in array
+        static int outindex = 0;
+        jglb["smartctl"]["output"][outindex++] = p;
+      }
+      if (!*p)
+        continue; // Skip empty line
+
+      if (msg_severity) {
+        // Collect non-empty messages in array
+        static int errindex = 0;
+        json::ref jref = jglb["smartctl"]["messages"][errindex++];
+        jref["string"] = p;
+        jref["severity"] = msg_severity;
+      }
+
+      if (   ( is_js_impl && print_as_json_impl  )
+          || (!is_js_impl && print_as_json_unimpl)) {
+        // Add (un)implemented non-empty lines to global object
+        jglb[strprintf("smartctl_%04d_%c", lineno,
+                     (is_js_impl ? 'i' : 'u')).c_str()] = p;
+      }
+    }
+  }
+}
+
+// Default: print to stdout
+// --json: ignore
+// --json=o: append to "output" array
+// --json=u: add "smartctl_NNNN_u" element(s)
+void pout(const char *fmt, ...)
+{
+  if (printing_is_off)
+    return;
+  if (print_as_json && !(print_as_json_output
+      || print_as_json_impl || print_as_json_unimpl))
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vjpout(false, 0, fmt, ap);
   va_end(ap);
-  fflush(stdout);
-  return;
+}
+
+// Default: Print to stdout
+// --json: ignore
+// --json=o: append to "output" array
+// --json=i: add "smartctl_NNNN_i" element(s)
+void jout(const char *fmt, ...)
+{
+  if (printing_is_off)
+    return;
+  if (print_as_json && !(print_as_json_output
+      || print_as_json_impl || print_as_json_unimpl))
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vjpout(true, 0, fmt, ap);
+  va_end(ap);
+}
+
+// Default: print to stdout
+// --json: append to "messages"
+// --json=o: append to "output" array
+// --json=i: add "smartctl_NNNN_i" element(s)
+void jinf(const char *fmt, ...)
+{
+  if (printing_is_off)
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vjpout(true, "information", fmt, ap);
+  va_end(ap);
+}
+
+void jwrn(const char *fmt, ...)
+{
+  if (printing_is_off)
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vjpout(true, "warning", fmt, ap);
+  va_end(ap);
+}
+
+void jerr(const char *fmt, ...)
+{
+  if (printing_is_off)
+    return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vjpout(true, "error", fmt, ap);
+  va_end(ap);
 }
 
 // Globals to set failuretest() policy
@@ -1198,7 +1409,7 @@ void failuretest(failure_type type, int returnvalue)
     if (!failuretest_conservative)
       return;
     pout("An optional SMART command failed: exiting. Remove '-T conservative' option to continue.\n");
-    EXIT(returnvalue);
+    throw int(returnvalue);
   }
 
   // If this is an error in a "mandatory" SMART command
@@ -1206,7 +1417,7 @@ void failuretest(failure_type type, int returnvalue)
     if (failuretest_permissive--)
       return;
     pout("A mandatory SMART command failed: exiting. To continue, add one or more '-T permissive' options.\n");
-    EXIT(returnvalue);
+    throw int(returnvalue);
   }
 
   throw std::logic_error("failuretest: Unknown type");
@@ -1224,7 +1435,7 @@ void checksumwarning(const char * string)
 
   // user has asked us to fail on checksum errors
   if (checksum_err_mode == CHECKSUM_ERR_EXIT)
-    EXIT(FAILSMART);
+    throw int(FAILSMART);
 }
 
 // Return info string about device protocol
@@ -1239,6 +1450,15 @@ static const char * get_protocol_info(const smart_device * dev)
     case 0x4: return "NVMe";
     default:  return "Unknown";
   }
+}
+
+// Add JSON device info
+static void js_device_info(const json::ref & jref, const smart_device * dev)
+{
+  jref["name"] = dev->get_dev_name();
+  jref["info_name"] = dev->get_info_name();
+  jref["type"] = dev->get_dev_type();
+  jref["protocol"] = get_protocol_info(dev);
 }
 
 // Device scan
@@ -1264,27 +1484,31 @@ void scan_devices(const smart_devtype_list & types, bool with_open, char ** argv
 
   for (unsigned i = 0; i < devlist.size(); i++) {
     smart_device_auto_ptr dev( devlist.release(i) );
+    json::ref jref = jglb["devices"][i];
 
     if (with_open) {
       printing_is_off = dont_print;
       dev.replace ( dev->autodetect_open() );
       printing_is_off = false;
-
-      if (!dev->is_open()) {
-        pout("# %s -d %s # %s, %s device open failed: %s\n", dev->get_dev_name(),
-          dev->get_dev_type(), dev->get_info_name(),
-          get_protocol_info(dev.get()), dev->get_errmsg());
-        continue;
-      }
     }
 
-    pout("%s -d %s", dev->get_dev_name(), dev->get_dev_type());
+    js_device_info(jref, dev.get());
+
+    if (with_open && !dev->is_open()) {
+      jout("# %s -d %s # %s, %s device open failed: %s\n", dev->get_dev_name(),
+           dev->get_dev_type(), dev->get_info_name(),
+           get_protocol_info(dev.get()), dev->get_errmsg());
+      jref["open_error"] = dev->get_errmsg();
+      continue;
+    }
+
+    jout("%s -d %s", dev->get_dev_name(), dev->get_dev_type());
     if (!argv[ai])
-      pout(" # %s, %s device\n", dev->get_info_name(), get_protocol_info(dev.get()));
+      jout(" # %s, %s device\n", dev->get_info_name(), get_protocol_info(dev.get()));
     else {
       for (int j = ai; argv[j]; j++)
-        pout(" %s", argv[j]);
-      pout("\n");
+        jout(" %s", argv[j]);
+      jout("\n");
     }
 
     if (dev->is_open())
@@ -1304,11 +1528,16 @@ static int main_worker(int argc, char **argv)
     return 1;
 
   // Parse input arguments
+  const char * type = 0;
   ata_print_options ataopts;
   scsi_print_options scsiopts;
   nvme_print_options nvmeopts;
   bool print_type_only = false;
-  const char * type = parse_options(argc, argv, ataopts, scsiopts, nvmeopts, print_type_only);
+  {
+    int status = parse_options(argc, argv, type, ataopts, scsiopts, nvmeopts, print_type_only);
+    if (status >= 0)
+      return status;
+  }
 
   const char * name = argv[argc-1];
 
@@ -1327,7 +1556,7 @@ static int main_worker(int argc, char **argv)
     dev = smi()->get_smart_device(name, type);
 
   if (!dev) {
-    pout("%s: %s\n", name, smi()->get_errmsg());
+    jerr("%s: %s\n", name, smi()->get_errmsg());
     if (type)
       printvalidarglistmessage('d');
     else
@@ -1342,8 +1571,8 @@ static int main_worker(int argc, char **argv)
          dev->get_info_name(), dev->get_dev_type(), get_protocol_info(dev.get()));
 
   if (dev->is_ata() && ataopts.powermode>=2 && dev->is_powered_down()) {
-    pout( "%s: Device is in %s mode, exit(%d)\n", dev->get_info_name(), "STANDBY (OS)", FAILPOWER );
-    return FAILPOWER;
+    jinf("Device is in STANDBY (OS) mode, exit(%d)\n", ataopts.powerexit);
+    return ataopts.powerexit;
   }
 
   // Open device
@@ -1361,14 +1590,17 @@ static int main_worker(int argc, char **argv)
         dev->get_info_name(), oldinfo.dev_type.c_str(), dev->get_dev_type());
   }
   if (!dev->is_open()) {
-    pout("Smartctl open device: %s failed: %s\n", dev->get_info_name(), dev->get_errmsg());
+    jerr("Smartctl open device: %s failed: %s\n", dev->get_info_name(), dev->get_errmsg());
     return FAILDEV;
   }
+
+  // Add JSON info similar to --scan output
+  js_device_info(jglb["device"], dev.get());
 
   // now call appropriate ATA or SCSI routine
   int retval = 0;
   if (print_type_only)
-    pout("%s: Device of type '%s' [%s] opened\n",
+    jout("%s: Device of type '%s' [%s] opened\n",
          dev->get_info_name(), dev->get_dev_type(), get_protocol_info(dev.get()));
   else if (dev->is_ata())
     retval = ataPrintMain(dev->to_ata(), ataopts);
@@ -1392,12 +1624,19 @@ int main(int argc, char **argv)
   bool badcode = false;
 
   try {
-    // Do the real work ...
-    status = main_worker(argc, argv);
-  }
-  catch (int ex) {
-    // EXIT(status) arrives here
-    status = ex;
+    try {
+      // Do the real work ...
+      status = main_worker(argc, argv);
+    }
+    catch (int ex) {
+      // Exit status from checksumwarning() and failuretest() arrives here
+      status = ex;
+    }
+    // Print JSON if enabled
+    if (jglb.has_uint128_output())
+      jglb["smartctl"]["uint128_precision_bits"] = uint128_to_str_precision_bits();
+    jglb["smartctl"]["exit_status"] = status;
+    jglb.print(stdout, print_as_json_options);
   }
   catch (const std::bad_alloc & /*ex*/) {
     // Memory allocation failed (also thrown by std::operator new)
