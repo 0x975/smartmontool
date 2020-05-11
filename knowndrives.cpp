@@ -255,7 +255,7 @@ static inline bool parse_default_presets(const char * presets,
 }
 
 // Parse '-v' and '-F' options in preset string, return false on error.
-static inline bool parse_presets(const char * presets,
+inline bool parse_presets(const char * presets,
                                  ata_vendor_attr_defs & defs,
                                  firmwarebug_defs & firmwarebugs)
 {

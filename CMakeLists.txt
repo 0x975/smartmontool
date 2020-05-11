@@ -72,6 +72,8 @@ set(WIN_
 set(UNIX_
   unix/config.h
   unix/svnversion.h
+  os_linux.h
+  os_linux.cpp
 )
 
 if(MSVC)

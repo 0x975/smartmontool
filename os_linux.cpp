@@ -72,6 +72,8 @@
 #include <selinux/selinux.h>
 #endif
 
+#include <sys/sysmacros.h>
+
 #include "atacmds.h"
 #include "os_linux.h"
 #include "scsicmds.h"

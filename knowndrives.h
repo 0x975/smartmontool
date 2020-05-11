@@ -50,11 +50,12 @@ int showmatchingpresets(const char *model, const char *firmware);
 // options in defs and firmwarebugs.
 // Values that have already been set will not be changed.
 // Returns pointer to database entry or nullptr if none found.
-const drive_settings * lookup_drive_apply_presets(
-  const ata_identify_device * drive, ata_vendor_attr_defs & defs,
+const drive_settings * lookup_drive_apply_presets(const ata_identify_device * drive, ata_vendor_attr_defs & defs,
   firmwarebug_defs & firmwarebugs);
 
 const drive_settings * lookup_drive(const char * model, const char * firmware);
+
+inline bool parse_presets(const char * presets, ata_vendor_attr_defs & defs, firmwarebug_defs & firmwarebugs);
 
 // Get path for additional database file
 const char * get_drivedb_path_add();
